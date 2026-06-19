@@ -77,7 +77,7 @@ CC_ROLLING_WINDOW = 120    # days for rolling current-coupon basis OLS
 HIST_PLOT_MODE = "fly"          # "cpn" or "fly"
 HIST_CPN_PAIR = ("G2 5.5", "FN 5.5")   # cpn1, cpn2 (without the " Price" suffix)
 HIST_FLY_TRIPLE = ("G2 3", "G2 3.5", "G2 4")  # front, middle, back (without suffix)
-HIST_REF_COL = "CT10"
+HIST_REF_COLS = ["CT10", "1y10y"]      # one column = 1 ref; two columns = 2x2 page
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +590,7 @@ def build_cpn_fly_summary_table(
     tmp = pd.concat(scores_list, axis=1)
     # Flatten multi-index columns to t0_vals, t0_scores, t1_vals, t1_scores, ...
     tmp.columns = [f"{second}_{first}" for first, second in tmp.columns]
+    tmp["carry"] = [_calc_latest_carry_for_swap_fly(dat, name) for name in tmp.index]
     return tmp
 
 
@@ -611,6 +612,24 @@ def _parse_swap_fly_name(name: str) -> Tuple[str, ...]:
         if len(tokens) >= 2:
             result.append((tokens[0], tokens[1]))
     return tuple(result)
+
+
+def _calc_latest_carry_for_swap_fly(dat: pd.DataFrame, name: str) -> float:
+    """Return the latest carry (drop units) for a swap or fly structure."""
+    legs = _parse_swap_fly_name(name)
+    if len(legs) == 2:
+        (ag1, cp1), (ag2, cp2) = legs
+        drop1 = f"{ag1} {cp1} Drop"
+        drop2 = f"{ag2} {cp2} Drop"
+        if drop1 not in dat.columns or drop2 not in dat.columns:
+            return np.nan
+        return float(dat[drop1].iloc[-1] - dat[drop2].iloc[-1])
+    if len(legs) == 3:
+        drops = [f"{ag} {cp} Drop" for ag, cp in legs]
+        if any(d not in dat.columns for d in drops):
+            return np.nan
+        return float(dat[drops[1]].iloc[-1] * 2 - dat[drops[0]].iloc[-1] - dat[drops[2]].iloc[-1])
+    return np.nan
 
 
 def run_ols_for_swap_fly(
@@ -1287,6 +1306,44 @@ def _add_summary_page(
     plt.close(fig)
 
 
+def _add_contents_page(
+    pdf: PdfPages,
+    dat: pd.DataFrame,
+    num_cpn_fly_structures: int = 0,
+) -> None:
+    """Add a simple contents page as the first page of the report."""
+    fig, ax = plt.subplots(figsize=(11.0, 8.5))
+    ax.axis("off")
+
+    title = "MBS RV Analysis Report"
+    subtitle = f"Latest date: {dat.index[-1].date()}  |  Observations: {len(dat)}"
+
+    ax.text(0.5, 0.90, title, fontsize=24, weight="bold", ha="center", transform=ax.transAxes)
+    ax.text(0.5, 0.84, subtitle, fontsize=12, ha="center", color="gray", transform=ax.transAxes)
+
+    contents = (
+        "Report contents\n\n"
+        "1. Coupon swap / fly / G2-FN score tables\n"
+        "2. Yield basis score tables\n"
+        "3. Current-coupon basis OLS summary\n"
+        "4. Current-coupon basis OLS parameters\n"
+        "5. Current-coupon basis fitted vs actual\n"
+        "6. Rolling current-coupon basis (120-day window)\n"
+        "7. Conventional vs Ginnie current-coupon OAS spread\n"
+        f"8. Appendix: historical charts for {num_cpn_fly_structures} cpn/fly structures"
+    )
+    ax.text(
+        0.5, 0.52, contents,
+        fontsize=12, family="monospace",
+        ha="center", va="center", transform=ax.transAxes,
+        bbox=dict(boxstyle="round,pad=0.6", facecolor="#f7f7f7", edgecolor="#40466e"),
+    )
+
+    fig.tight_layout()
+    pdf.savefig(fig, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _add_table_page(
     pdf: PdfPages,
     df: pd.DataFrame,
@@ -1370,90 +1427,159 @@ def _build_hist_swap_fly_series(
     return series.dropna(), label
 
 
+def _build_hist_carry_series(
+    dat: pd.DataFrame,
+    mode: str = HIST_PLOT_MODE,
+    pair: Tuple[str, str] = HIST_CPN_PAIR,
+    triple: Tuple[str, str, str] = HIST_FLY_TRIPLE,
+) -> Optional[pd.Series]:
+    """Build the historical carry series for the configured swap or fly."""
+    if mode == "cpn":
+        cpn1, cpn2 = pair
+        col1 = f"{cpn1} Drop"
+        col2 = f"{cpn2} Drop"
+        if col1 not in dat.columns or col2 not in dat.columns:
+            return None
+        carry = dat[col1] - dat[col2]
+    elif mode == "fly":
+        front, middle, back = triple
+        cols = [f"{c} Drop" for c in (front, middle, back)]
+        if any(c not in dat.columns for c in cols):
+            return None
+        carry = dat[cols[1]] * 2 - dat[cols[0]] - dat[cols[2]]
+    else:
+        return None
+    return carry.dropna()
+
+
 def plot_historical_cpn_fly(
     dat: pd.DataFrame,
     mode: str = HIST_PLOT_MODE,
     pair: Tuple[str, str] = HIST_CPN_PAIR,
     triple: Tuple[str, str, str] = HIST_FLY_TRIPLE,
-    ref_col: str = HIST_REF_COL,
+    ref_cols: List[str] = HIST_REF_COLS,
 ) -> plt.Figure:
     """
-    Plot a historical coupon swap or fly (in 32nds) vs a reference rate.
+    Plot a historical coupon swap or fly (in 32nds) vs one or more references.
 
-    Returns a two-panel figure:
-        - top: time series of the swap/fly with the reference on a twin axis
-        - bottom: scatter of swap/fly vs reference, latest point highlighted
+    Returns a figure with 2 rows x N columns:
+        - top row: time series of the swap/fly with each reference on a twin axis
+        - bottom row: scatter of swap/fly vs each reference, latest point highlighted
     """
-    if ref_col not in dat.columns:
-        raise KeyError(f"Reference column not found: {ref_col}")
+    if isinstance(ref_cols, str):
+        ref_cols = [ref_cols]
 
-    series, label = _build_hist_swap_fly_series(dat, mode=mode, pair=pair, triple=triple)
-    ref = dat[ref_col]
+    missing = [c for c in ref_cols if c not in dat.columns]
+    if missing:
+        raise KeyError(f"Reference column(s) not found: {missing}")
 
-    # Align indices and drop missing observations
-    df = pd.concat([series, ref], axis=1).dropna()
-    if df.empty:
-        raise ValueError("No overlapping data for historical coupon/fly plot.")
-    series = df.iloc[:, 0]
-    ref = df.iloc[:, 1]
+    series_full, label = _build_hist_swap_fly_series(dat, mode=mode, pair=pair, triple=triple)
+    latest_val = float(series_full.iloc[-1])
+    hist_min = float(series_full.min())
+    hist_max = float(series_full.max())
 
-    latest_val = float(series.iloc[-1])
-    hist_min = float(series.min())
-    hist_max = float(series.max())
-
-    fig, axes = plt.subplots(2, 1, figsize=(10.5, 8.0))
-
-    # --- Top: time series ---
-    ax1 = axes[0]
-    color_swap = "navy"
-    ax1.plot(series.index, series, color=color_swap, linewidth=1.2, label=label)
-    ax1.set_ylabel(f"{label} (32nds)", color=color_swap)
-    ax1.tick_params(axis="y", labelcolor=color_swap)
-    ax1.grid(True, alpha=0.3)
-
-    ax2 = ax1.twinx()
-    ax2.plot(ref.index, ref, color="red", linewidth=1.0, label=ref_col)
-    ax2.set_ylabel(ref_col, color="red")
-    ax2.tick_params(axis="y", labelcolor="red")
-
-    ax1.set_title(f"Historical {label} vs {ref_col}", fontsize=12, weight="bold")
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(
-        lines1 + lines2, labels1 + labels2,
-        loc="lower left", fontsize=8, framealpha=0.9,
-    )
+    carry_full = _build_hist_carry_series(dat, mode=mode, pair=pair, triple=triple)
+    carry_drops_text = ""
+    if carry_full is not None and not carry_full.empty:
+        latest_carry = float(carry_full.iloc[-1])
+        if mode == "cpn":
+            cpn1, cpn2 = pair
+            d1 = float(dat[f"{cpn1} Drop"].iloc[-1])
+            d2 = float(dat[f"{cpn2} Drop"].iloc[-1])
+            carry_drops_text = (
+                f"Carry: {latest_carry:.2f}  |  "
+                f"Drops: {cpn1}={d1:.2f}, {cpn2}={d2:.2f}"
+            )
+        elif mode == "fly":
+            front, middle, back = triple
+            d_front = float(dat[f"{front} Drop"].iloc[-1])
+            d_mid = float(dat[f"{middle} Drop"].iloc[-1])
+            d_back = float(dat[f"{back} Drop"].iloc[-1])
+            carry_drops_text = (
+                f"Carry: {latest_carry:.2f}  |  "
+                f"Drops: {front}={d_front:.2f}, "
+                f"{middle}={d_mid:.2f}, {back}={d_back:.2f}"
+            )
 
     stats_text = (
         f"Latest: {latest_val:.2f}\n"
         f"Max: {hist_max:.2f}\n"
         f"Min: {hist_min:.2f}"
     )
-    ax1.text(
-        0.98, 0.95, stats_text,
-        transform=ax1.transAxes,
-        verticalalignment="top",
-        horizontalalignment="right",
-        fontsize=9,
-        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6),
-    )
 
-    # --- Bottom: scatter ---
-    ax = axes[1]
-    ax.scatter(ref.iloc[:-1], series.iloc[:-1], c="gray", alpha=0.3, s=30, label="Historical data")
-    ax.scatter(
-        ref.iloc[-1], series.iloc[-1],
-        c="red", s=150, marker="*",
-        edgecolors="black", linewidth=1.5,
-        zorder=10, label="Latest point",
-    )
-    ax.set_xlabel(ref_col, fontsize=10)
-    ax.set_ylabel(f"{label} (32nds)", fontsize=10)
-    ax.set_title(f"{label} vs {ref_col}", fontsize=12, weight="bold")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper left", fontsize=8)
+    n_refs = len(ref_cols)
+    fig, axes = plt.subplots(2, n_refs, figsize=(5.5 * n_refs, 8.0), sharey="all")
 
-    fig.tight_layout()
+    if n_refs == 1:
+        axes = axes.reshape(-1, 1)
+
+    for j, ref_col in enumerate(ref_cols):
+        ref = dat[ref_col]
+        df = pd.concat([series_full, ref], axis=1).dropna()
+        if df.empty:
+            continue
+        series = df.iloc[:, 0]
+        ref = df.iloc[:, 1]
+
+        # --- Top: time series ---
+        ax1 = axes[0, j]
+        color_swap = "navy"
+        ax1.plot(series.index, series, color=color_swap, linewidth=1.2, label=label)
+        if j == 0:
+            ax1.set_ylabel(f"{label} (32nds)", color=color_swap)
+        ax1.tick_params(axis="y", labelcolor=color_swap)
+        ax1.grid(True, alpha=0.3)
+
+        ax2 = ax1.twinx()
+        ax2.plot(ref.index, ref, color="red", linewidth=1.0, label=ref_col)
+        ax2.set_ylabel(ref_col, color="red")
+        ax2.tick_params(axis="y", labelcolor="red")
+
+        title_text = f"{label} vs {ref_col}"
+        if carry_drops_text:
+            title_text += f"\n{carry_drops_text}"
+        ax1.set_title(title_text, fontsize=10, weight="bold", ha="center")
+        for tick in ax1.get_xticklabels():
+            tick.set_rotation(30)
+            tick.set_horizontalalignment("right")
+
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(
+            lines1 + lines2, labels1 + labels2,
+            loc="lower left", fontsize=7, framealpha=0.9,
+        )
+
+        ax1.text(
+            0.98, 0.95, stats_text,
+            transform=ax1.transAxes,
+            verticalalignment="top",
+            horizontalalignment="right",
+            fontsize=8,
+            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6),
+        )
+
+        # --- Bottom: scatter ---
+        ax = axes[1, j]
+        ax.scatter(
+            ref.iloc[:-1], series.iloc[:-1],
+            c="gray", alpha=0.3, s=25, label="Historical data",
+        )
+        ax.scatter(
+            ref.iloc[-1], series.iloc[-1],
+            c="red", s=120, marker="*",
+            edgecolors="black", linewidth=1.5,
+            zorder=10, label="Latest point",
+        )
+        ax.set_xlabel(ref_col, fontsize=9)
+        if j == 0:
+            ax.set_ylabel(f"{label} (32nds)", fontsize=9)
+        ax.set_title(f"{label} vs {ref_col}", fontsize=11, weight="bold")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="upper left", fontsize=7)
+
+    fig.suptitle(f"Historical {label}", fontsize=13, weight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
     return fig
 
 
@@ -1549,7 +1675,7 @@ def generate_pdf_report(
     # Reorder columns: time-slice scores first, then model stats, then mkt + historical range
     time_cols = [f"{prefix}_t{i}" for i in range(len(DEFAULT_SCORE_INDICES)) for prefix in ("vals", "scores")]
     model_cols = ["mdl_val", "resid_std", "r2", "resid_z"]
-    market_cols = ["mkt_val", "hist_min", "hist_max", "range_ratio"]
+    market_cols = ["mkt_val", "carry", "hist_min", "hist_max", "range_ratio"]
     cpn_fly_summary = cpn_fly_summary[time_cols + model_cols + market_cols]
 
     score_cols = ["scores_t0", "resid_z", "range_ratio"]
@@ -1570,6 +1696,9 @@ def generate_pdf_report(
     basis_score_cols = ["scores_t0"]
 
     with PdfPages(pdf_path) as pdf:
+        # Contents page
+        _add_contents_page(pdf, dat, num_cpn_fly_structures=len(cpn_fly_summary))
+
         # Cpn/fly pages
         for group_name, group_df in groups.items():
             _add_table_page(
@@ -1583,14 +1712,6 @@ def generate_pdf_report(
                 pagesize=(17.0, 8.5),
                 compact=True,
             )
-
-        # Historical coupon swap / fly plot (configurable via HIST_* constants)
-        try:
-            fig = plot_historical_cpn_fly(dat)
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-        except Exception as exc:
-            print(f"Historical coupon/fly plot section skipped: {exc}")
 
         # Yield basis pages
         for group_name, group_df in basis_groups.items():
@@ -1659,6 +1780,37 @@ def generate_pdf_report(
             plt.close(fig)
         except Exception as exc:
             print(f"Current-coupon basis section skipped: {exc}")
+
+        # Appendix: historical coupon/fly charts for every cpn/fly structure
+        try:
+            for name in cpn_fly_summary.index:
+                legs = _parse_swap_fly_name(name)
+                if len(legs) == 2:
+                    mode = "cpn"
+                    pair = (f"{legs[0][0]} {legs[0][1]}", f"{legs[1][0]} {legs[1][1]}")
+                    triple = HIST_FLY_TRIPLE
+                elif len(legs) == 3:
+                    mode = "fly"
+                    pair = HIST_CPN_PAIR
+                    triple = (
+                        f"{legs[0][0]} {legs[0][1]}",
+                        f"{legs[1][0]} {legs[1][1]}",
+                        f"{legs[2][0]} {legs[2][1]}",
+                    )
+                else:
+                    continue
+
+                fig = plot_historical_cpn_fly(
+                    dat,
+                    mode=mode,
+                    pair=pair,
+                    triple=triple,
+                    ref_cols=HIST_REF_COLS,
+                )
+                pdf.savefig(fig, bbox_inches="tight")
+                plt.close(fig)
+        except Exception as exc:
+            print(f"Historical cpn/fly appendix skipped: {exc}")
 
     return pdf_path
 
