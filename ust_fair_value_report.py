@@ -68,7 +68,7 @@ FED_HOLDING_TICKER = "FARBNTNM Index"
 # Regression setup
 PREDICTOR_LIST = [1, 2, 5, 6, 7]  # indices in datFinal
 RESPONSE_IDX = 0
-ROLLING_WINDOW = 500
+ROLLING_WINDOW = 250
 STRAT_PARAMS = (1.25, 0.3, 10, 5)  # openThreshold, closeThreshold, maxHoldingDays, stopLoss
 
 # ---------------------------------------------------------------------------
@@ -822,7 +822,7 @@ def plot_rolling_residual(rolling_df: pd.DataFrame) -> plt.Figure:
     ax.axhline(-1.25, color="red", linestyle="--", linewidth=0.8)
     ax.set_xlabel("Date")
     ax.set_ylabel("Residual / In-Sample Std")
-    ax.set_title("Rolling Fair-Value Residual Z-Score")
+    ax.set_title(f"Rolling Fair-Value Residual Z-Score ({ROLLING_WINDOW}-day rolling OLS)")
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -838,9 +838,10 @@ def plot_recent_rolling_mkt_vs_mdl(recent_df: pd.DataFrame) -> plt.Figure:
     ax.set_ylabel("Yield (%)")
     ax.set_title(
         f"Recent Rolling Market vs Model 10Y UST Yield "
-        f"(current mkt={recent_df['mkt_val'].iloc[-1]:.2f}, "
-        f"mdl={recent_df['mdl_val'].iloc[-1]:.2f}, "
-        f"resid ratio={recent_df['resid_z'].iloc[-1]:.2f})"
+        f"(current mkt={recent_df['mkt_val'].iloc[-1]:.3f}, "
+        f"mdl={recent_df['mdl_val'].iloc[-1]:.3f}, "
+        f"resid ratio={recent_df['resid_z'].iloc[-1]:.3f}) "
+        f"— {ROLLING_WINDOW}-day rolling window"
     )
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -855,7 +856,7 @@ def plot_recent_rolling_residual(recent_df: pd.DataFrame) -> plt.Figure:
     ax.axhline(0, color="black", linewidth=0.8)
     ax.set_xlabel("Date")
     ax.set_ylabel("Residual (bps)")
-    ax.set_title("Recent Rolling Fair-Value Residual")
+    ax.set_title(f"Recent Rolling Fair-Value Residual ({ROLLING_WINDOW}-day rolling window)")
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -879,14 +880,15 @@ def generate_pdf_report(
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     if pdf_path is None:
-        pdf_path = OUTPUT_DIR / "UST_FairValue_Report.pdf"
+        report_date = date.today().strftime("%Y%m%d")
+        pdf_path = OUTPUT_DIR / f"UST_FairValue_Report_{report_date}.pdf"
         if pdf_path.exists():
             try:
                 with open(pdf_path, "ab"):
                     pass
             except PermissionError:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                pdf_path = OUTPUT_DIR / f"UST_FairValue_Report_{ts}.pdf"
+                pdf_path = OUTPUT_DIR / f"UST_FairValue_Report_{report_date}_{ts}.pdf"
 
     summary = build_model_summary_dict(model, pd.DataFrame())
     params_table = build_regression_params_table(model)

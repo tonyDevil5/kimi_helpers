@@ -48,14 +48,16 @@ COUNTRIES = {
     "frf": "France",
     "dem": "Germany",
     "jpy": "Japan",
+    "uk": "United Kingdom",
 }
-TENORS = ["2y", "5y", "10y", "20y", "30y"]
+TENORS = ["2y", "5y", "7y", "10y", "20y", "30y"]
 
 TICKERS = {
-    "us": ["GT02 Govt", "GT05 Govt", "GT10 Govt", "GT20 Govt", "GT30 Govt"],
-    "frf": ["GTFRF2Y Govt", "GTFRF5Y Govt", "GTFRF10Y Govt", "GTFRF20Y Govt", "GTFRF30Y Govt"],
-    "dem": ["GTDEM2Y Govt", "GTDEM5Y Govt", "GTDEM10Y Govt", "GTDEM20Y Govt", "GTDEM30Y Govt"],
-    "jpy": ["GTJPY2Y Govt", "GTJPY5Y Govt", "GTJPY10Y Govt", "GTJPY20Y Govt", "GTJPY30Y Govt"],
+    "us": ["GT02 Govt", "GT05 Govt", "GT07 Govt", "GT10 Govt", "GT20 Govt", "GT30 Govt"],
+    "frf": ["GTFRF2Y Govt", "GTFRF5Y Govt", "GTFRF7Y Govt", "GTFRF10Y Govt", "GTFRF20Y Govt", "GTFRF30Y Govt"],
+    "dem": ["GTDEM2Y Govt", "GTDEM5Y Govt", "GTDEM7Y Govt", "GTDEM10Y Govt", "GTDEM20Y Govt", "GTDEM30Y Govt"],
+    "jpy": ["GTJPY2Y Govt", "GTJPY5Y Govt", "GTJPY7Y Govt", "GTJPY10Y Govt", "GTJPY20Y Govt", "GTJPY30Y Govt"],
+    "uk": ["GUKG2 Index", "GUKG5 Index", "GUKG7 Index", "GUKG10 Index", "GUKG20 Index", "GUKG30 Index"],
 }
 
 # Map each ticker to a {country}_{tenor} column
@@ -64,17 +66,22 @@ for country, tickers in TICKERS.items():
     for ticker, tenor in zip(tickers, TENORS):
         TICKER_TO_COL[ticker] = f"{country}_{tenor}"
 
+# Spread analysis uses the existing US 10Y generic yield (us_10y = GT10 Govt)
+# vs Germany 10Y (dem_10y = GTDEM10Y Govt) and France 10Y (frf_10y = GTFRF10Y Govt).
+
 # Currency / funding rate mapping
 CURRENCY = {
     "us": "usd",
     "frf": "eur",
     "dem": "eur",
     "jpy": "jpy",
+    "uk": "gbp",
 }
 FUNDING_TICKERS = {
     "usd": "SOFRRATE Index",
     "eur": "ESTRON Index",
     "jpy": "MUTKCALM Index",
+    "gbp": "SONIO/N Index",
 }
 CARRY_WINDOW = 50
 
@@ -91,6 +98,13 @@ HORIZONS = {
 RSI_PERIOD = 14
 BB_WINDOW = 20
 BB_NSTD = 2.0
+
+# Recent-window quantile analysis
+QUANTILE_WINDOW = 60
+
+# Realized volatility lookback (business days) and annualization factor
+REALIZED_VOL_WINDOW = 20
+REALIZED_VOL_ANNUALIZE = 252  # business days in a year
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +182,9 @@ def _parse_bbg_ticker(ticker: str) -> str:
     import re
 
     t = str(ticker).upper()
-    if "FRF" in t:
+    if "GUKG" in t:
+        country = "uk"
+    elif "FRF" in t:
         country = "frf"
     elif "DEM" in t:
         country = "dem"
@@ -211,11 +227,30 @@ def compute_bbands(series: pd.Series, window: int = BB_WINDOW, n_std: float = BB
     return mid, upper, lower
 
 
+def compute_realized_volatility(series: pd.Series, window: int = REALIZED_VOL_WINDOW) -> pd.Series:
+    """
+    Annualized realized volatility of daily yield changes.
+
+    Yields are assumed in percent.  Returns volatility in bps.
+    """
+    s = series.astype(float)
+    daily_change = s.diff()
+    vol = daily_change.rolling(window=window, min_periods=window).std() * np.sqrt(REALIZED_VOL_ANNUALIZE) * 100
+    return vol
+
+
 def compute_yield_changes(df: pd.DataFrame) -> pd.DataFrame:
     """Compute yield changes in bps for each horizon."""
     changes = {}
     for label, days in HORIZONS.items():
-        changes[label] = (df - df.shift(days)) * 100  # yield * 100 -> bps
+        if label == "1d":
+            # The report is typically run during Asia hours, so the latest
+            # observation is a live/Asia price rather than the previous day's
+            # close. Compute the true 1-day change as the last completed daily
+            # close vs the close before that (t-1 vs t-2).
+            changes[label] = (df.shift(days) - df.shift(days + 1)) * 100
+        else:
+            changes[label] = (df - df.shift(days)) * 100  # yield * 100 -> bps
     return pd.concat(changes, axis=1)
 
 
@@ -261,6 +296,10 @@ def build_summary_table(
         change_row["rsi"] = rsi.iloc[-1]
         change_row["bb_pos"] = bb_pos
 
+        # Realized volatility (annualized, bps)
+        rv = compute_realized_volatility(series)
+        change_row["rv20"] = rv.iloc[-1]
+
         # Carry profile
         if funding_df is not None:
             country = col.split("_")[0]
@@ -292,6 +331,121 @@ def group_summary_by_tenor(summary: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
 
 # ---------------------------------------------------------------------------
+# Spread analysis
+# ---------------------------------------------------------------------------
+def build_spread_summary_table(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build a summary table for GT10 vs Bund/OAT 10Y spreads.
+
+    Columns: level, 1d/1w/1m/3m/6m/1y change (bps), RSI, BB position, RV20.
+    No carry metrics.
+    """
+    required = {"us_10y", "dem_10y", "frf_10y"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns for spread analysis: {missing}")
+
+    spread_pairs = {
+        "GT10 - Bund10": df["us_10y"] - df["dem_10y"],
+        "GT10 - OAT10Y": df["us_10y"] - df["frf_10y"],
+    }
+
+    rows = []
+    for name, spread in spread_pairs.items():
+        # Drop leading NaNs but keep internal ones so the series is continuous
+        spread = spread.dropna()
+        if spread.empty:
+            continue
+
+        latest = spread.iloc[-1]
+
+        # Spread changes in bps
+        spread_df = pd.DataFrame({name: spread})
+        changes = compute_yield_changes(spread_df)
+
+        change_row = {"level": latest}
+        for horizon in HORIZONS:
+            change_row[f"chg_{horizon}"] = changes[(horizon, name)].iloc[-1]
+
+        # RSI and BB position
+        rsi = compute_rsi(spread)
+        mid, upper, lower = compute_bbands(spread)
+        bb_pos = np.nan
+        if pd.notna(upper.iloc[-1]) and pd.notna(lower.iloc[-1]) and upper.iloc[-1] != lower.iloc[-1]:
+            bb_pos = (latest - lower.iloc[-1]) / (upper.iloc[-1] - lower.iloc[-1])
+
+        change_row["rsi"] = rsi.iloc[-1]
+        change_row["bb_pos"] = bb_pos
+
+        # Realized volatility (annualized, bps)
+        rv = compute_realized_volatility(spread)
+        change_row["rv20"] = rv.iloc[-1]
+
+        # 1-year (250-day) spread quantiles and empirical percentile
+        window_1y = 250
+        recent = spread.tail(window_1y)
+        if not recent.empty:
+            q = recent.quantile([0.0, 0.25, 0.5, 0.75, 1.0])
+            min_v = float(q[0.0])
+            max_v = float(q[1.0])
+            # True empirical percentile: share of observations <= current
+            emp_pct = (recent <= latest).mean()
+            change_row["min_1y"] = min_v
+            change_row["p25_1y"] = float(q[0.25])
+            change_row["p50_1y"] = float(q[0.5])
+            change_row["p75_1y"] = float(q[0.75])
+            change_row["max_1y"] = max_v
+            change_row["pct_1y"] = emp_pct
+
+        rows.append(pd.Series(change_row, name=name))
+
+    if not rows:
+        return pd.DataFrame()
+
+    summary = pd.DataFrame(rows)
+    summary.index.name = "spread"
+    return summary
+
+
+def build_quantile_summary_table(
+    df: pd.DataFrame, window: int = QUANTILE_WINDOW
+) -> Dict[str, pd.DataFrame]:
+    """
+    For each country, compute min/25%/50%/75%/max over the recent window
+    and highlight where the current yield sits in that range.
+    """
+    recent = df.tail(window)
+    summaries: Dict[str, pd.DataFrame] = {}
+    for country in COUNTRIES:
+        rows = []
+        for tenor in TENORS:
+            col = f"{country}_{tenor}"
+            if col not in df.columns:
+                continue
+            series = recent[col]
+            current = float(series.iloc[-1])
+            q = series.quantile([0.0, 0.25, 0.5, 0.75, 1.0])
+            min_v = float(q[0.0])
+            max_v = float(q[1.0])
+            range_pct = (current - min_v) / (max_v - min_v) if max_v != min_v else np.nan
+            rows.append(
+                {
+                    "tenor": tenor,
+                    "current": current,
+                    "min": min_v,
+                    "p25": float(q[0.25]),
+                    "p50": float(q[0.5]),
+                    "p75": float(q[0.75]),
+                    "max": max_v,
+                    "range_pct": range_pct,
+                }
+            )
+        if rows:
+            summaries[country] = pd.DataFrame(rows).set_index("tenor")
+    return summaries
+
+
+# ---------------------------------------------------------------------------
 # PDF report helpers
 # ---------------------------------------------------------------------------
 def _df_to_figure(
@@ -313,15 +467,15 @@ def _df_to_figure(
     display_df = df.copy()
     for col in display_df.columns:
         if pd.api.types.is_float_dtype(display_df[col]):
-            display_df[col] = display_df[col].map(lambda x: f"{x:.2f}" if pd.notna(x) else "")
+            display_df[col] = display_df[col].map(lambda x: f"{x:.3f}" if pd.notna(x) else "")
 
     n_rows, n_cols = display_df.shape
     fig = plt.figure(figsize=pagesize)
-    ax = fig.add_axes([0.04, 0.03, 0.92, 0.86])
+    ax = fig.add_axes([0.04, 0.03, 0.92, 0.84])
     ax.axis("off")
-    fig.suptitle(title, fontsize=13, weight="bold", y=0.97, ha="left", x=0.04)
+    fig.suptitle(title, fontsize=13, weight="bold", y=0.98, ha="left", x=0.04)
     if subtitle:
-        ax.text(0.04, 0.94, subtitle, fontsize=8, ha="left", transform=fig.transFigure, color="#555555")
+        ax.text(0.04, 0.93, subtitle, fontsize=8, ha="left", transform=fig.transFigure, color="#555555")
 
     table_data = [display_df.columns.tolist()] + display_df.values.tolist()
     if n_cols > 1:
@@ -429,11 +583,58 @@ def _add_table_page(
     plt.close(fig)
 
 
+def plot_spread_history_1y(df: pd.DataFrame) -> plt.Figure:
+    """Plot 1-year history of GT10 vs Bund10 and GT10 vs OAT10 spreads."""
+    required = {"us_10y", "dem_10y", "frf_10y"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns for spread history plot: {missing}")
+
+    # Last ~1 year of data
+    window = 252
+    recent = df.tail(window)
+
+    spreads = {
+        "GT10 - Bund10": recent["us_10y"] - recent["dem_10y"],
+        "GT10 - OAT10Y": recent["us_10y"] - recent["frf_10y"],
+    }
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    colors = {"GT10 - Bund10": "green", "GT10 - OAT10Y": "red"}
+
+    for ax, (name, spread) in zip(axes, spreads.items()):
+        spread_bps = spread * 100
+        ax.plot(spread_bps.index, spread_bps, color=colors.get(name, "blue"), linewidth=1.2)
+        ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
+        # Tight y-axis: from min to max with small padding only for the zero line
+        ymin, ymax = spread_bps.min(), spread_bps.max()
+        pad = (ymax - ymin) * 0.02 if ymax != ymin else 1.0
+        ax.set_ylim(ymin - pad, ymax + pad)
+        ax.set_ylabel("Spread (bps)")
+        ax.set_title(f"{name} 1-Year History")
+        ax.grid(True, alpha=0.3)
+
+        # Latest annotation
+        latest = spread_bps.iloc[-1]
+        ax.text(
+            0.02, 0.95,
+            f"Latest: {latest:.1f} bps",
+            transform=ax.transAxes,
+            fontsize=10,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6),
+        )
+
+    axes[-1].set_xlabel("Date")
+    plt.subplots_adjust(hspace=0.25)
+    return fig
+
+
 def plot_yield_curves(df: pd.DataFrame, countries: List[str]) -> plt.Figure:
     """Plot latest yield curve for each country."""
     fig, ax = plt.subplots(figsize=(11, 6))
-    tenors_num = [2, 5, 10, 20, 30]
-    colors = {"us": "blue", "frf": "red", "dem": "green", "jpy": "orange"}
+    tenors_num = [2, 5, 7, 10, 20, 30]
+    colors = {"us": "blue", "frf": "red", "dem": "green", "jpy": "orange", "uk": "purple"}
 
     for country in countries:
         yields = []
@@ -485,14 +686,15 @@ def generate_pdf_report(
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     if pdf_path is None:
-        pdf_path = OUTPUT_DIR / "DM_GOVY_Report.pdf"
+        report_date = date.today().strftime("%Y%m%d")
+        pdf_path = OUTPUT_DIR / f"DM_GOVY_Report_{report_date}.pdf"
         if pdf_path.exists():
             try:
                 with open(pdf_path, "ab"):
                     pass
             except PermissionError:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                pdf_path = OUTPUT_DIR / f"DM_GOVY_Report_{ts}.pdf"
+                pdf_path = OUTPUT_DIR / f"DM_GOVY_Report_{report_date}_{ts}.pdf"
 
     summary = build_summary_table(df, funding_df=funding_df)
 
@@ -507,9 +709,9 @@ def generate_pdf_report(
     summary_sorted = summary.loc[sorted(summary.index, key=_sort_key)]
 
     # One compact wide table: all countries/tenors, all metrics
-    base_cols = ["yield"] + [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos"]
+    base_cols = ["yield"] + [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20"]
     display_cols = base_cols + (["carry_bps", "carry_ratio"] if funding_df is not None else [])
-    gradient_cols = [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos"]
+    gradient_cols = [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20"]
     if funding_df is not None:
         gradient_cols += ["carry_bps", "carry_ratio"]
     if funding_df is not None:
@@ -519,23 +721,77 @@ def generate_pdf_report(
         subtitle = f"Latest: {_idx_date(df.index[-1])} | Data start: {_idx_date(df.index[0])}"
 
     with PdfPages(pdf_path) as pdf:
-        # Compact combined table (all tenors in one page)
-        _add_table_page(
-            pdf,
-            summary_sorted[display_cols],
-            "DM Government Bonds — Yield, Changes, RSI, BB Position & Carry",
-            subtitle=subtitle,
-            gradient_columns=gradient_cols,
-            fontsize=5.5,
-            row_height=0.05,
-            pagesize=(13.0, 8.5),
-            compact=True,
-        )
+        # Compact summary tables split by tenor group
+        tenor_groups = [
+            ("2y / 5y / 7y", ["2y", "5y", "7y"]),
+            ("10y / 20y / 30y", ["10y", "20y", "30y"]),
+        ]
+        for group_name, group_tenors in tenor_groups:
+            mask = summary_sorted.index.map(lambda x: x.split("_")[1] in group_tenors)
+            sub = summary_sorted.loc[mask, display_cols]
+            if sub.empty:
+                continue
+            _add_table_page(
+                pdf,
+                sub,
+                f"DM Government Bonds — {group_name}",
+                subtitle=subtitle,
+                gradient_columns=gradient_cols,
+                fontsize=6.5,
+                row_height=0.06,
+                pagesize=(13.0, 8.5),
+                compact=True,
+            )
+
+        # GT10 vs Bund/OAT spread summary table
+        try:
+            spread_summary = build_spread_summary_table(df)
+            if not spread_summary.empty:
+                quantile_cols = ["min_1y", "p25_1y", "p50_1y", "p75_1y", "max_1y", "pct_1y"]
+                spread_cols = ["level"] + [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20"] + quantile_cols
+                _add_table_page(
+                    pdf,
+                    spread_summary[spread_cols],
+                    "GT10 Spread Analysis",
+                    subtitle=f"Latest: {_idx_date(df.index[-1])}  |  GT10 vs 10Y Bund / OAT  |  changes in bps",
+                    gradient_columns=[f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20", "pct_1y"],
+                    fontsize=8,
+                    row_height=0.10,
+                    pagesize=(13.0, 5.5),
+                    compact=True,
+                )
+
+                # 1-year spread history chart
+                fig = plot_spread_history_1y(df)
+                pdf.savefig(fig)
+                plt.close(fig)
+        except ValueError as exc:
+            print(f"Skipping spread table: {exc}")
+        except Exception as exc:
+            print(f"Skipping spread history plot: {exc}")
 
         # Yield curve chart
         fig = plot_yield_curves(df, list(COUNTRIES.keys()))
         pdf.savefig(fig)
         plt.close(fig)
+
+        # Recent-window quantile summary by country
+        quantile_summaries = build_quantile_summary_table(df, window=QUANTILE_WINDOW)
+        q_subtitle = f"Latest: {_idx_date(df.index[-1])}  |  Window: last {QUANTILE_WINDOW} observations"
+        for country, q_df in quantile_summaries.items():
+            q_df_sorted = q_df.reindex(TENORS)
+            country_name = COUNTRIES.get(country, country)
+            _add_table_page(
+                pdf,
+                q_df_sorted,
+                f"{country_name} — {QUANTILE_WINDOW}-Day Yield Quantiles",
+                subtitle=q_subtitle,
+                gradient_columns=["range_pct"],
+                fontsize=9,
+                row_height=0.08,
+                pagesize=(10.0, 5.0),
+                compact=True,
+            )
 
     return pdf_path
 
@@ -570,7 +826,9 @@ def _add_summary_page(pdf: PdfPages, df: pd.DataFrame, summary: pd.DataFrame) ->
         "Report contents:\n"
         "1. Compact DM bond summary table\n"
         "   (yield, 1d/1w/1m/3m/6m/1y changes, RSI, BB position)\n"
-        "2. DM yield curve snapshot"
+        "2. DM yield curve snapshot\n"
+        f"3. {QUANTILE_WINDOW}-day yield quantiles by country\n"
+        "   (current yield vs min/25%/50%/75%/max)"
     )
     ax.text(0.55, 0.70, contents, fontsize=10, family="monospace",
             verticalalignment="top", transform=ax.transAxes,

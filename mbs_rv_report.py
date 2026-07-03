@@ -27,6 +27,7 @@ Outputs are written to ./mbs_rv_output/ by default.
 from __future__ import annotations
 
 import warnings
+from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -64,6 +65,10 @@ DEFAULT_ROLL_LOOKBACK = 90
 DEFAULT_BASIS_LOOKBACK = 60
 DEFAULT_PERF_WINDOWS = [-1, -5, -10, -35, -60, -90, -120, -200]
 
+# Rolling performance z-score section
+ROLL_SUM_WINDOW = 5          # days for rolling performance sum
+ROLL_SUM_Z_WINDOW = 20       # days for z-score lookback on the rolling sum
+
 # Current-coupon basis analysis
 CC_TICKERS = {
     "Conventional": ".FNCC105 G Index",
@@ -72,6 +77,11 @@ CC_TICKERS = {
 CC_PREDICTORS = ["10y", "2s10s", "1y10y_vol"]
 CC_LAG_PREDICTORS = False  # use t-1 predictors for t response
 CC_ROLLING_WINDOW = 120    # days for rolling current-coupon basis OLS
+
+# Per-coupon yield basis OLS (same predictors as CC basis, applied to FN/G2 coupons)
+COUPON_BASIS_AGENCIES = ["FN", "G2"]
+COUPON_BASIS_PREDICTORS = CC_PREDICTORS
+COUPON_BASIS_LAG_PREDICTORS = CC_LAG_PREDICTORS
 
 # Historical coupon-swap / fly plot section (added after the cpn/fly tables)
 HIST_PLOT_MODE = "fly"          # "cpn" or "fly"
@@ -95,6 +105,70 @@ def load_mbs_rv(fpath: str | Path = FNAME) -> pd.DataFrame:
     print(f"Loaded {fpath.name}: {dat.shape[0]} rows x {dat.shape[1]} cols, "
           f"{dat.index[0].date()} to {dat.index[-1].date()}")
     return dat
+
+
+# ---------------------------------------------------------------------------
+# TSY OAS z-score section (Data tab)
+# ---------------------------------------------------------------------------
+TSY_OAS_LOOKBACK = 252  # ~1 year trading days
+
+
+def load_tsy_oas_data(fpath: str | Path = FNAME) -> pd.DataFrame:
+    """Load FN/G2 TSY OAS columns from the 'Data' tab."""
+    fpath = Path(fpath)
+    df = pd.read_excel(fpath, sheet_name="Data")
+    # First column is the date regardless of header
+    date_col = df.columns[0]
+    df = df.rename(columns={date_col: "date"})
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+
+    oas_cols = [c for c in df.columns if c.endswith(" TSY OAS")]
+    oas_df = df[oas_cols].copy()
+    oas_df = oas_df.dropna()
+    print(f"Loaded TSY OAS data: {oas_df.shape[0]} rows x {oas_df.shape[1]} cols, "
+          f"{oas_df.index[0].date()} to {oas_df.index[-1].date()}")
+    return oas_df
+
+
+def _parse_oas_col_name(col: str) -> Tuple[str, float]:
+    """Parse 'FN 2.5 TSY OAS' -> ('FN', 2.5) or 'G2 6.5 TSY OAS' -> ('G2', 6.5)."""
+    parts = col.split()
+    agency = parts[0]
+    coupon = float(parts[1])
+    return agency, coupon
+
+
+def build_tsy_oas_summary(oas_df: pd.DataFrame, lookback: int = TSY_OAS_LOOKBACK) -> pd.DataFrame:
+    """
+    For each FN/G2 coupon, compute latest OAS and z-score vs trailing 1y history.
+    """
+    rows = []
+    for col in sorted(oas_df.columns):
+        agency, coupon = _parse_oas_col_name(col)
+        series = oas_df[col]
+        if len(series) < lookback:
+            continue
+        hist = series.iloc[-lookback:]
+        current = float(series.iloc[-1])
+        hist_mean = float(hist.mean())
+        hist_std = float(hist.std(ddof=1))
+        zscore = (current - hist_mean) / hist_std if hist_std != 0 else np.nan
+        rows.append({
+            "agency": agency,
+            "coupon": coupon,
+            "current_oas": current,
+            "hist_mean": hist_mean,
+            "hist_std": hist_std,
+            "z_score": zscore,
+            "obs": len(hist),
+        })
+
+    summary = pd.DataFrame(rows)
+    if summary.empty:
+        return summary
+    summary = summary.sort_values(["agency", "coupon"]).set_index(["agency", "coupon"])
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +493,177 @@ def plot_conv_ginnie_cc_spread(
 # ---------------------------------------------------------------------------
 # Column helpers
 # ---------------------------------------------------------------------------
+def build_coupon_basis_df(
+    dat: pd.DataFrame,
+    predictors: pd.DataFrame,
+    agencies: List[str] = COUPON_BASIS_AGENCIES,
+    ref_basis: str = REF_BASIS,
+) -> pd.DataFrame:
+    """Merge UST predictors with per-coupon yield basis vs CT10 for each agency."""
+    basis_frames = [predictors]
+    for agency in agencies:
+        for cpn in COUPONS:
+            yield_col = _col(agency, cpn, "Yield")
+            if yield_col not in dat.columns or ref_basis not in dat.columns:
+                continue
+            basis = (dat[yield_col] - dat[ref_basis]) * 100.0
+            basis.name = f"{agency} {cpn:g}"
+            basis_frames.append(basis)
+
+    df = pd.concat(basis_frames, axis=1).dropna()
+    print(f"Coupon basis dataset: {df.shape[0]} rows x {df.shape[1]} cols")
+    return df
+
+
+def run_coupon_basis_ols(
+    df_basis: pd.DataFrame, response_col: str
+) -> Tuple[pd.Series, pd.DataFrame, sm.regression.linear_model.RegressionResultsWrapper]:
+    """Run full-sample OLS for one coupon yield-basis series."""
+    X = df_basis[COUPON_BASIS_PREDICTORS].copy()
+    if COUPON_BASIS_LAG_PREDICTORS:
+        X = X.shift(1)
+    Y = df_basis[response_col]
+
+    df = pd.concat([Y, X], axis=1).dropna()
+    Y = df[response_col]
+    X = sm.add_constant(df[COUPON_BASIS_PREDICTORS])
+    model = sm.OLS(Y, X).fit()
+    return Y, X, model
+
+
+def build_coupon_basis_summary(df_basis: pd.DataFrame) -> pd.DataFrame:
+    """Summary table for every agency-coupon yield-basis OLS."""
+    rows = []
+    response_cols = [c for c in df_basis.columns if c not in COUPON_BASIS_PREDICTORS]
+    for col in response_cols:
+        Y, X, model = run_coupon_basis_ols(df_basis, col)
+        resid_std = float(np.std(model.resid))
+        mkt = float(Y.iloc[-1])
+        mdl = float(model.fittedvalues.iloc[-1])
+        diff = mkt - mdl
+        rows.append(
+            {
+                "structure": col,
+                "mkt_val": mkt,
+                "mdl_val": mdl,
+                "diff": diff,
+                "resid_std": resid_std,
+                "resid_z": diff / resid_std if resid_std != 0 else np.nan,
+                "r2": float(model.rsquared),
+                "obs": int(model.nobs),
+            }
+        )
+    return pd.DataFrame(rows).set_index("structure")
+
+
+def build_coupon_basis_params_table(df_basis: pd.DataFrame) -> pd.DataFrame:
+    """Regression parameters for every agency-coupon yield-basis OLS."""
+    rows = []
+    response_cols = [c for c in df_basis.columns if c not in COUPON_BASIS_PREDICTORS]
+    for col in response_cols:
+        Y, X, model = run_coupon_basis_ols(df_basis, col)
+        for param in model.params.index:
+            rows.append(
+                {
+                    "structure": col,
+                    "feature": param,
+                    "coef": float(model.params[param]),
+                    "std_err": float(model.bse[param]),
+                    "t_stat": float(model.tvalues[param]),
+                    "p_value": float(model.pvalues[param]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def build_coupon_basis_coef_matrix(df_basis: pd.DataFrame) -> pd.DataFrame:
+    """
+    Wide coefficient matrix: rows = coupons, columns = agency-predictor pairs.
+
+    Excludes the constant. Useful for comparing how a given predictor's
+    sensitivity varies across coupons and agencies.
+    """
+    response_cols = [c for c in df_basis.columns if c not in COUPON_BASIS_PREDICTORS]
+    records = []
+    for col in response_cols:
+        parts = col.split()
+        if len(parts) != 2:
+            continue
+        agency, cpn_str = parts
+        Y, X, model = run_coupon_basis_ols(df_basis, col)
+        row = {"coupon": float(cpn_str), "agency": agency}
+        for feat in COUPON_BASIS_PREDICTORS:
+            row[feat] = float(model.params.get(feat, np.nan))
+        records.append(row)
+
+    df = pd.DataFrame(records).sort_values(["agency", "coupon"])
+    if df.empty:
+        return pd.DataFrame()
+
+    matrix = df.pivot(index="coupon", columns="agency", values=COUPON_BASIS_PREDICTORS)
+    # Flatten columns to "FN 10y", "G2 10y", "FN 2s10s", ...
+    matrix.columns = [f"{agency} {feat}" for feat, agency in matrix.columns]
+    matrix = matrix.reindex([c for c in COUPONS if c in matrix.index])
+    return matrix
+
+
+def plot_coupon_basis_fitted(df_basis: pd.DataFrame) -> List[plt.Figure]:
+    """Actual-vs-fitted plots per agency (2x4 grid of coupons)."""
+    response_cols = [c for c in df_basis.columns if c not in COUPON_BASIS_PREDICTORS]
+    agency_groups: Dict[str, List[str]] = {}
+    for col in response_cols:
+        agency = col.split()[0]
+        agency_groups.setdefault(agency, []).append(col)
+
+    figures = []
+    for agency, cols in agency_groups.items():
+        # sort by coupon numeric value
+        cols_sorted = sorted(cols, key=lambda x: float(x.split()[1]))
+        n_cols = len(cols_sorted)
+        nrows = int(np.ceil(n_cols / 4))
+        ncols = min(n_cols, 4)
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4.0 * ncols, 3.0 * nrows), sharex=False)
+        if n_cols == 1:
+            axes = np.array([axes])
+        axes = axes.flatten()
+
+        for ax, col in zip(axes, cols_sorted):
+            Y, X, model = run_coupon_basis_ols(df_basis, col)
+            ax.plot(Y.index, Y, color="red", alpha=0.7, label="Actual", linewidth=1.0)
+            ax.plot(Y.index, model.fittedvalues, color="blue", alpha=0.7, label="Fitted", linewidth=1.0)
+            ax.set_title(col, fontsize=9, weight="bold")
+            ax.set_ylabel("Basis (bps)", fontsize=8)
+            ax.tick_params(axis="both", labelsize=7)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7, loc="upper left")
+
+            resid_std = float(np.std(model.resid))
+            diff = float(Y.iloc[-1] - model.fittedvalues.iloc[-1])
+            ax.text(
+                0.98, 0.03,
+                f"mkt={Y.iloc[-1]:.1f}\nmdl={model.fittedvalues.iloc[-1]:.1f}\nz={diff / resid_std if resid_std else np.nan:.2f}",
+                transform=ax.transAxes,
+                fontsize=7,
+                verticalalignment="bottom",
+                horizontalalignment="right",
+                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+            )
+
+        # hide unused subplots
+        for ax in axes[n_cols:]:
+            ax.axis("off")
+
+        fig.suptitle(
+            f"Per-Coupon Yield Basis OLS: {agency} MBS",
+            fontsize=13,
+            weight="bold",
+        )
+        fig.tight_layout(rect=[0, 0.03, 1, 0.94])
+        figures.append(fig)
+
+    return figures
+
+
 def _col(agency: str, cpn: float, field: str) -> str:
     """Build a column name like 'FN 5.5 Price'."""
     return f"{agency} {cpn:g} {field}"
@@ -709,6 +954,11 @@ def run_ols_for_swap_fly(
         "mdl_val": float(model.fittedvalues.iloc[-1]),
         "resid_std": float(np.std(model.resid)),
         "r2": float(model.rsquared),
+        "coef_const": float(model.params.get("const", np.nan)),
+        "coef_price": float(model.params.get("price", np.nan)),
+        "coef_slope": float(model.params.get("slope", np.nan)),
+        "coef_carry": float(model.params.get("carry", np.nan)),
+        "coef_vol": float(model.params.get("vol", np.nan)),
     }
 
 
@@ -867,6 +1117,62 @@ def calc_perf_summary(
         # iloc[lb:] works for negative lb (trailing window)
         combined[f"perf{lb}"] = [dat[col].iloc[lb:].sum() for col in all_perf]
     return combined
+
+
+def build_perf_summary_table(
+    dat: pd.DataFrame,
+    lookback_windows: List[int] = None,
+) -> pd.DataFrame:
+    """
+    Build a formatted performance-over-periods table: one row per FN/G2 coupon,
+    columns for each trailing window in days.
+    """
+    lookback_windows = lookback_windows or DEFAULT_PERF_WINDOWS
+    df = calc_perf_summary(dat, lookback_windows)
+    df = df.rename(columns={f"perf{lb}": f"{abs(lb)}d" for lb in lookback_windows})
+    df.index.name = "name"
+    df = df.reset_index()
+    df["agency"] = df["name"].apply(
+        lambda x: "FN" if str(x).startswith("FN") else ("G2" if str(x).startswith("G2") else "Other")
+    )
+    return df.set_index(["agency", "name"])
+
+
+def build_rolling_perf_zscore_table(
+    dat: pd.DataFrame,
+    roll_sum_window: int = ROLL_SUM_WINDOW,
+    roll_z_window: int = ROLL_SUM_Z_WINDOW,
+) -> pd.DataFrame:
+    """
+    Rolling-sum performance z-score table.
+
+    For each FN/G2 coupon Perf column:
+      - compute rolling sum over roll_sum_window
+      - compute z-score of that rolling sum over roll_z_window
+    Returns the latest values for each series.
+    """
+    total_perf = get_block_columns(dat, "FN", "Perf") + get_block_columns(dat, "G2", "Perf")
+    rows = []
+    for name in total_perf:
+        col = dat[name]
+        rolling_sum = col.rolling(window=roll_sum_window).sum()
+        rolling_mean = rolling_sum.rolling(window=roll_z_window).mean()
+        rolling_std = rolling_sum.rolling(window=roll_z_window).std()
+        z_score = (rolling_sum - rolling_mean) / rolling_std.replace(0, np.nan)
+        rows.append(
+            {
+                "name": name,
+                "latest_perf": col.iloc[-1],
+                f"roll_sum_{roll_sum_window}d": rolling_sum.iloc[-1],
+                f"z_score_{roll_z_window}d": z_score.iloc[-1],
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    df["agency"] = df["name"].apply(
+        lambda x: "FN" if str(x).startswith("FN") else ("G2" if str(x).startswith("G2") else "Other")
+    )
+    return df.set_index(["agency", "name"])
 
 
 # ---------------------------------------------------------------------------
@@ -1091,6 +1397,8 @@ def _df_to_figure(
     header_color: str = "#40466e",
     row_height: float = 0.35,
     gradient_columns: Optional[List[str]] = None,
+    gradient_vranges: Optional[Dict[str, Tuple[float, float]]] = None,
+    diverging_columns: Optional[List[str]] = None,
     compact: bool = False,
     include_index: bool = True,
 ) -> plt.Figure:
@@ -1164,11 +1472,21 @@ def _df_to_figure(
         cell.set_text_props(weight="bold", color="white")
         cell.set_height(cell_h)
 
-    # Pre-compute color functions for each gradient column based on its actual range
+    # Pre-compute color functions for each gradient column.
+    # Use caller-supplied global ranges if provided so all pages share the same scale.
+    gradient_vranges = gradient_vranges or {}
+    diverging_columns = diverging_columns or []
     color_funcs = {}
     for col_name in gradient_cols:
         if col_name in df.columns:
-            color_funcs[col_name] = _column_color_func(df[col_name])
+            vr = gradient_vranges.get(col_name)
+            vmin, vmax = (vr[0], vr[1]) if vr else (None, None)
+            color_funcs[col_name] = _column_color_func(
+                df[col_name],
+                vmin=vmin,
+                vmax=vmax,
+                force_diverging=(col_name in diverging_columns),
+            )
 
     # Row styles + optional heatmap on selected columns
     for i in range(1, n_rows + 1):
@@ -1201,8 +1519,8 @@ def _score_to_color(
     norm = (score - vmin) / (vmax - vmin)
     norm = max(0.0, min(1.0, norm))
 
-    # coolwarm: 0 = blue, 0.5 = white, 1 = red
-    cmap = mcolors.LinearSegmentedColormap.from_list("diverging", ["#4575b4", "#ffffff", "#d73027"])
+    # Use matplotlib's coolwarm: 0 = blue, 0.5 = white, 1 = red
+    cmap = plt.get_cmap("coolwarm")
     return mcolors.to_hex(cmap(norm)[:3])
 
 
@@ -1224,16 +1542,25 @@ def _sequential_color(
     return mcolors.to_hex(cmap(norm)[:3])
 
 
-def _column_color_func(series: pd.Series):
+def _column_color_func(
+    series: pd.Series,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    force_diverging: bool = False,
+):
     """Pick the right coloring function and range for a numeric column."""
     s = series.dropna()
     if s.empty:
         return lambda x: "#ffffff"
 
-    vmin, vmax = float(s.min()), float(s.max())
+    if vmin is None:
+        vmin = float(s.min())
+    if vmax is None:
+        vmax = float(s.max())
 
-    # If values cross zero, use diverging blue-white-red centered at 0
-    if vmin < 0 < vmax:
+    # For z-score-like columns (or when forced), always use diverging blue-white-red
+    # centered at 0 so negative and positive values are colored consistently.
+    if force_diverging or (vmin < 0 < vmax):
         limit = max(abs(vmin), abs(vmax), 0.01)
         return lambda x: _score_to_color(float(x), -limit, limit)
 
@@ -1306,6 +1633,47 @@ def _add_summary_page(
     plt.close(fig)
 
 
+def build_reference_dates_table(dat: pd.DataFrame) -> pd.DataFrame:
+    """Build a table of reference dates for all lookback windows."""
+    rows = []
+    basis_score_indices = [-1, -5, -10, -20, -30, -40, -50]
+
+    for i, idx in enumerate(DEFAULT_SCORE_INDICES):
+        d = dat.index[idx]
+        rows.append(
+            {
+                "category": "Cpn/Fly/G2FN score",
+                "label": f"t{i}",
+                "date_ymd": d.strftime("%Y%m%d"),
+                "calendar_date": str(d.date()),
+            }
+        )
+
+    for i, idx in enumerate(basis_score_indices):
+        d = dat.index[idx]
+        rows.append(
+            {
+                "category": "Yield basis score",
+                "label": f"t{i}",
+                "date_ymd": d.strftime("%Y%m%d"),
+                "calendar_date": str(d.date()),
+            }
+        )
+
+    for lb in DEFAULT_PERF_WINDOWS:
+        d = dat.index[lb]
+        rows.append(
+            {
+                "category": "Perf window start",
+                "label": f"{lb}d",
+                "date_ymd": d.strftime("%Y%m%d"),
+                "calendar_date": str(d.date()),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def _add_contents_page(
     pdf: PdfPages,
     dat: pd.DataFrame,
@@ -1325,12 +1693,17 @@ def _add_contents_page(
         "Report contents\n\n"
         "1. Coupon swap / fly / G2-FN score tables\n"
         "2. Yield basis score tables\n"
-        "3. Current-coupon basis OLS summary\n"
-        "4. Current-coupon basis OLS parameters\n"
-        "5. Current-coupon basis fitted vs actual\n"
-        "6. Rolling current-coupon basis (120-day window)\n"
-        "7. Conventional vs Ginnie current-coupon OAS spread\n"
-        f"8. Appendix: historical charts for {num_cpn_fly_structures} cpn/fly structures"
+        "3. Performance over periods\n"
+        "4. Rolling performance z-scores\n"
+        "5. Current-coupon basis OLS summary\n"
+        "6. Current-coupon basis OLS parameters\n"
+        "7. Current-coupon basis fitted vs actual\n"
+        "8. Rolling current-coupon basis (120-day window)\n"
+        "9. Conventional vs Ginnie current-coupon OAS spread\n"
+        "10. Per-coupon yield basis OLS summary\n"
+        "11. Per-coupon yield basis OLS parameters\n"
+        "12. Per-coupon yield basis fitted vs actual\n"
+        f"13. Appendix: historical charts for {num_cpn_fly_structures} cpn/fly structures"
     )
     ax.text(
         0.5, 0.52, contents,
@@ -1350,6 +1723,8 @@ def _add_table_page(
     title: str,
     subtitle: Optional[str] = None,
     gradient_columns: Optional[List[str]] = None,
+    gradient_vranges: Optional[Dict[str, Tuple[float, float]]] = None,
+    diverging_columns: Optional[List[str]] = None,
     fontsize: int = 8,
     row_height: float = 0.35,
     pagesize: Tuple[float, float] = (11.0, 8.5),
@@ -1362,6 +1737,8 @@ def _add_table_page(
         title,
         subtitle=subtitle,
         gradient_columns=gradient_columns,
+        gradient_vranges=gradient_vranges,
+        diverging_columns=diverging_columns,
         fontsize=fontsize,
         row_height=row_height,
         pagesize=pagesize,
@@ -1656,8 +2033,9 @@ def generate_pdf_report(
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     if pdf_path is None:
-        pdf_path = OUTPUT_DIR / "MBS_RV_Report.pdf"
-        # If the default file is locked (e.g., open in a PDF reader), use a timestamped name
+        report_date = date.today().strftime("%Y%m%d")
+        pdf_path = OUTPUT_DIR / f"MBS_RV_Report_{report_date}.pdf"
+        # If the dated file is locked (e.g., open in a PDF reader), use a timestamped name
         if pdf_path.exists():
             try:
                 with open(pdf_path, "ab"):
@@ -1665,7 +2043,7 @@ def generate_pdf_report(
             except PermissionError:
                 from datetime import datetime
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                pdf_path = OUTPUT_DIR / f"MBS_RV_Report_{ts}.pdf"
+                pdf_path = OUTPUT_DIR / f"MBS_RV_Report_{report_date}_{ts}.pdf"
 
     # Build the notebook-style wide cpn/fly summary table and add OLS + range metrics
     cpn_fly_summary = build_cpn_fly_summary_table(dat)
@@ -1675,10 +2053,25 @@ def generate_pdf_report(
     # Reorder columns: time-slice scores first, then model stats, then mkt + historical range
     time_cols = [f"{prefix}_t{i}" for i in range(len(DEFAULT_SCORE_INDICES)) for prefix in ("vals", "scores")]
     model_cols = ["mdl_val", "resid_std", "r2", "resid_z"]
+    coef_cols = ["coef_price", "coef_slope", "coef_carry", "coef_vol"]
     market_cols = ["mkt_val", "carry", "hist_min", "hist_max", "range_ratio"]
-    cpn_fly_summary = cpn_fly_summary[time_cols + model_cols + market_cols]
+    cpn_fly_summary = cpn_fly_summary[time_cols + model_cols + market_cols + coef_cols]
 
     score_cols = ["scores_t0", "resid_z", "range_ratio"]
+    diverging_cols = ["scores_t0", "resid_z"]
+
+    # Global value ranges for heatmap colors so every page uses the same scale
+    gradient_vranges = {}
+    for col in score_cols:
+        if col in cpn_fly_summary.columns:
+            vmin = float(cpn_fly_summary[col].min())
+            vmax = float(cpn_fly_summary[col].max())
+            if col in diverging_cols:
+                # Symmetric diverging scale centered at 0
+                limit = max(abs(vmin), abs(vmax), 0.01)
+                gradient_vranges[col] = (-limit, limit)
+            else:
+                gradient_vranges[col] = (vmin, vmax)
 
     # Group rows by category so each page is tight and readable
     groups = _group_cpn_fly_rows(cpn_fly_summary)
@@ -1707,6 +2100,8 @@ def generate_pdf_report(
                 f"{group_name}  (latest: {dat.index[-1].date()})",
                 subtitle=subtitle,
                 gradient_columns=score_cols,
+                gradient_vranges=gradient_vranges,
+                diverging_columns=diverging_cols,
                 fontsize=5.5,
                 row_height=0.05,
                 pagesize=(17.0, 8.5),
@@ -1727,15 +2122,46 @@ def generate_pdf_report(
                 compact=True,
             )
 
+        # Performance over periods
+        perf_summary = build_perf_summary_table(dat)
+        perf_cols = [f"{abs(lb)}d" for lb in DEFAULT_PERF_WINDOWS]
+        _add_table_page(
+            pdf,
+            perf_summary,
+            "Performance Over Periods",
+            subtitle=f"Cumulative performance over trailing windows  |  Latest: {dat.index[-1].date()}",
+            gradient_columns=perf_cols,
+            fontsize=8,
+            row_height=0.06,
+            pagesize=(12.0, 8.5),
+            compact=True,
+        )
+
+        # Rolling performance z-scores
+        rolling_perf_z = build_rolling_perf_zscore_table(dat)
+        rolling_perf_cols = ["latest_perf", f"roll_sum_{ROLL_SUM_WINDOW}d", f"z_score_{ROLL_SUM_Z_WINDOW}d"]
+        _add_table_page(
+            pdf,
+            rolling_perf_z,
+            f"Rolling Performance Z-Scores ({ROLL_SUM_WINDOW}d sum / {ROLL_SUM_Z_WINDOW}d z-score)",
+            subtitle=f"Latest: {dat.index[-1].date()}",
+            gradient_columns=rolling_perf_cols,
+            fontsize=8,
+            row_height=0.06,
+            pagesize=(12.0, 8.5),
+            compact=True,
+        )
+
         # Current-coupon basis OLS (Conventional + Ginnie)
         try:
             if df_basis is None:
                 df_basis = build_current_coupon_basis_df(FNAME)
             cc_summary = build_current_coupon_summary(df_basis)
+            cc_lag_text = " (lagged 1d)" if CC_LAG_PREDICTORS else ""
             cc_subtitle = (
                 f"Latest: {df_basis.index[-1].date()}  |  "
                 f"Obs: {len(df_basis)}  |  "
-                f"Predictors: 10y, 2s10s, 1y10y_vol (lagged 1d)"
+                f"Predictors: 10y, 2s10s, 1y10y_vol{cc_lag_text}"
             )
             _add_table_page(
                 pdf,
@@ -1780,6 +2206,78 @@ def generate_pdf_report(
             plt.close(fig)
         except Exception as exc:
             print(f"Current-coupon basis section skipped: {exc}")
+
+        # FN/G2 TSY OAS current level vs 1y history z-score
+        try:
+            oas_df = load_tsy_oas_data(FNAME)
+            oas_summary = build_tsy_oas_summary(oas_df, lookback=TSY_OAS_LOOKBACK)
+            if not oas_summary.empty:
+                oas_subtitle = (
+                    f"Latest: {oas_df.index[-1].date()}  |  "
+                    f"1y lookback: {TSY_OAS_LOOKBACK} trading days  |  "
+                    f"z-score = (current - 1y mean) / 1y std"
+                )
+                _add_table_page(
+                    pdf,
+                    oas_summary.reset_index(),
+                    "FN / G2 TSY OAS vs 1-Year History Z-Score",
+                    subtitle=oas_subtitle,
+                    gradient_columns=["z_score"],
+                    fontsize=8,
+                    row_height=0.05,
+                    pagesize=(8.5, 5.5),
+                    compact=True,
+                    include_index=False,
+                )
+        except Exception as exc:
+            print(f"TSY OAS z-score section skipped: {exc}")
+
+        # Per-coupon yield basis OLS (same predictors as CC basis)
+        try:
+            predictors = load_ust_yield_vol_data(FNAME)
+            cb_basis = build_coupon_basis_df(dat, predictors)
+            if not cb_basis.empty:
+                cb_summary = build_coupon_basis_summary(cb_basis)
+                cb_params = build_coupon_basis_params_table(cb_basis)
+                cb_lag_text = " (lagged 1d)" if COUPON_BASIS_LAG_PREDICTORS else ""
+                cb_subtitle = (
+                    f"Latest: {cb_basis.index[-1].date()}  |  "
+                    f"Obs: {len(cb_basis)}  |  "
+                    f"Predictors: 10y, 2s10s, 1y10y_vol{cb_lag_text}"
+                )
+                _add_table_page(
+                    pdf,
+                    cb_summary,
+                    "Per-Coupon Yield Basis OLS Summary",
+                    subtitle=cb_subtitle,
+                    gradient_columns=["diff", "resid_z"],
+                    fontsize=8,
+                    row_height=0.06,
+                    pagesize=(11.0, 6.0),
+                    compact=True,
+                )
+                cb_coef_matrix = build_coupon_basis_coef_matrix(cb_basis)
+                if not cb_coef_matrix.empty:
+                    for feat in COUPON_BASIS_PREDICTORS:
+                        feat_cols = [c for c in cb_coef_matrix.columns if c.endswith(f" {feat}")]
+                        if not feat_cols:
+                            continue
+                        _add_table_page(
+                            pdf,
+                            cb_coef_matrix[feat_cols],
+                            f"Per-Coupon Yield Basis Coefficients — {feat}",
+                            subtitle=cb_subtitle,
+                            gradient_columns=feat_cols,
+                            fontsize=10,
+                            row_height=0.09,
+                            pagesize=(8.0, 4.5),
+                            compact=True,
+                        )
+                for fig in plot_coupon_basis_fitted(cb_basis):
+                    pdf.savefig(fig, bbox_inches="tight")
+                    plt.close(fig)
+        except Exception as exc:
+            print(f"Per-coupon yield basis section skipped: {exc}")
 
         # Appendix: historical coupon/fly charts for every cpn/fly structure
         try:
