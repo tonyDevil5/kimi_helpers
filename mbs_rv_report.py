@@ -2263,6 +2263,210 @@ def plot_structure_ct10_rolling_corr_pages(
     return figures
 
 
+def build_cross_structure_ct10_risk_summary(
+    df_basis: pd.DataFrame,
+    g2_fn_data: pd.DataFrame,
+    coupon_swap_data: pd.DataFrame,
+    wide_swap_data: pd.DataFrame,
+    coupon_fly_data: pd.DataFrame,
+) -> Tuple[pd.DataFrame, List[Dict]]:
+    """Combine CT10 correlations and daily-distribution statistics by structure.
+
+    The analyzed daily series is the daily OAS change for current-coupon basis,
+    JPM daily relative performance for G2/FN and coupon swaps, and the daily
+    price change for three-price flies. Correlations use daily CT10 yield
+    changes in basis points. Trailing statistics use the latest paired
+    observations, so their sample convention is consistent across families.
+    """
+    rows: List[Dict] = []
+    series_meta: List[Dict] = []
+
+    def add_series(
+        family: str,
+        structure: str,
+        values: pd.Series,
+        ct10_change: pd.Series,
+        unit: str,
+    ) -> None:
+        pair = pd.concat(
+            [
+                pd.to_numeric(values, errors="coerce").rename("value"),
+                pd.to_numeric(ct10_change, errors="coerce").rename("ct10_change_bps"),
+            ],
+            axis=1,
+        ).dropna()
+        if pair.empty:
+            return
+
+        value = pair["value"]
+        row = {
+            "family": family,
+            "structure": structure,
+            "unit": unit,
+            "obs": len(pair),
+            "latest": value.iloc[-1],
+            "corr_all": value.corr(pair["ct10_change_bps"]),
+            "mean": value.mean(),
+            "vol_all": value.std(),
+            "p05": value.quantile(0.05),
+            "median": value.median(),
+            "p95": value.quantile(0.95),
+        }
+        for window in G2_FN_CORR_WINDOWS:
+            trailing = pair.tail(window)
+            row[f"corr_{window}d"] = trailing["value"].corr(
+                trailing["ct10_change_bps"]
+            )
+            row[f"vol_{window}d"] = trailing["value"].std()
+        rows.append(row)
+        series_meta.append(
+            {
+                "family": family,
+                "structure": structure,
+                "unit": unit,
+                "values": value,
+            }
+        )
+
+    basis_ct10_change = pd.to_numeric(df_basis["10y"], errors="coerce").diff() * 100.0
+    for col, label in (("FNCC", "FN current-coupon basis"), ("G2CC", "G2 current-coupon basis")):
+        if col in df_basis.columns:
+            add_series(
+                "Current-coupon basis",
+                label,
+                pd.to_numeric(df_basis[col], errors="coerce").diff(),
+                basis_ct10_change,
+                "bps/day",
+            )
+
+    for coupon in G2_FN_PERF_COUPONS:
+        key = f"g2_fn_{coupon:g}_perf_32nds"
+        add_series(
+            "G2/FN relative perf",
+            f"G2/FN {coupon:g}",
+            g2_fn_data[key],
+            g2_fn_data["ct10_change_bps"],
+            "32nds/day",
+        )
+
+    for agency in STRUCTURE_AGENCIES:
+        for high, low in COUPON_SWAP_PAIRS:
+            key = f"{agency.lower()}_{high:g}_{low:g}_swap_perf_32nds"
+            add_series(
+                "Adjacent coupon swap",
+                f"{agency} {high:g}/{low:g}",
+                coupon_swap_data[key],
+                coupon_swap_data["ct10_change_bps"],
+                "32nds/day",
+            )
+
+    for agency in STRUCTURE_AGENCIES:
+        for high, low in WIDE_COUPON_SWAP_PAIRS:
+            key = f"{agency.lower()}_{high:g}_{low:g}_wide_swap_perf_32nds"
+            add_series(
+                "100bp coupon swap",
+                f"{agency} {high:g}/{low:g}",
+                wide_swap_data[key],
+                wide_swap_data["ct10_change_bps"],
+                "32nds/day",
+            )
+
+    for agency in STRUCTURE_AGENCIES:
+        for center in COUPON_FLY_CENTERS:
+            key = f"{agency.lower()}_{center:g}_fly_change_32nds"
+            add_series(
+                "Three-price fly",
+                f"{agency} {center:g} fly",
+                coupon_fly_data[key],
+                coupon_fly_data["ct10_change_bps"],
+                "32nds/day",
+            )
+
+    columns = [
+        "family", "structure", "unit", "obs", "latest",
+        "corr_all", *[f"corr_{w}d" for w in G2_FN_CORR_WINDOWS],
+        "mean", "vol_all", *[f"vol_{w}d" for w in G2_FN_CORR_WINDOWS],
+        "p05", "median", "p95",
+    ]
+    return pd.DataFrame(rows)[columns], series_meta
+
+
+def plot_cross_structure_distribution_pages(
+    series_meta: List[Dict],
+) -> List[plt.Figure]:
+    """Create empirical daily-distribution pages for every monitored series."""
+    figures: List[plt.Figure] = []
+    family_order = [
+        "Current-coupon basis",
+        "G2/FN relative perf",
+        "Adjacent coupon swap",
+        "100bp coupon swap",
+        "Three-price fly",
+    ]
+    family_colors = {
+        "Current-coupon basis": "#2563eb",
+        "G2/FN relative perf": "#7c3aed",
+        "Adjacent coupon swap": "#059669",
+        "100bp coupon swap": "#d97706",
+        "Three-price fly": "#dc2626",
+    }
+
+    for family in family_order:
+        family_series = [item for item in series_meta if item["family"] == family]
+        for page_start in range(0, len(family_series), 6):
+            page_items = family_series[page_start : page_start + 6]
+            fig, axes = plt.subplots(3, 2, figsize=(13, 10))
+            axes_flat = axes.ravel()
+            color = family_colors[family]
+            for ax, item in zip(axes_flat, page_items):
+                values = pd.to_numeric(item["values"], errors="coerce").dropna()
+                bins = min(32, max(12, int(np.sqrt(len(values)) * 1.5)))
+                mean = float(values.mean())
+                std = float(values.std())
+                p05 = float(values.quantile(0.05))
+                p95 = float(values.quantile(0.95))
+                ax.hist(values, bins=bins, color=color, alpha=0.72, edgecolor="white")
+                ax.axvline(mean, color="#111827", lw=1.2, label=f"Mean {mean:+.2f}")
+                ax.axvline(mean - std, color="#475569", lw=0.9, ls="--")
+                ax.axvline(mean + std, color="#475569", lw=0.9, ls="--", label=f"Std {std:.2f}")
+                ax.axvline(p05, color="#94a3b8", lw=0.8, ls=":")
+                ax.axvline(p95, color="#94a3b8", lw=0.8, ls=":", label=f"P05/P95 {p05:+.2f}/{p95:+.2f}")
+                ax.set_title(item["structure"], fontsize=10, weight="bold")
+                ax.set_xlabel(item["unit"])
+                ax.set_ylabel("Observations")
+                ax.grid(True, axis="y", alpha=0.2)
+                ax.legend(loc="upper right", fontsize=6.5)
+                ax.text(
+                    0.02,
+                    0.96,
+                    f"N = {len(values):,}\nSkew = {values.skew():+.2f}",
+                    transform=ax.transAxes,
+                    va="top",
+                    fontsize=7,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.85),
+                )
+            for ax in axes_flat[len(page_items) :]:
+                ax.set_visible(False)
+            page_no = page_start // 6 + 1
+            page_count = (len(family_series) + 5) // 6
+            fig.suptitle(
+                f"{family}: Daily Distribution ({page_no}/{page_count})",
+                fontsize=14,
+                weight="bold",
+            )
+            fig.text(
+                0.5,
+                0.012,
+                "Histogram uses the full available sample; dashed lines are mean +/- 1 standard deviation; dotted lines are the 5th and 95th percentiles.",
+                ha="center",
+                fontsize=8,
+                color="#475569",
+            )
+            fig.tight_layout(rect=[0, 0.035, 1, 0.96])
+            figures.append(fig)
+    return figures
+
+
 def build_rolling_perf_zscore_table(
     dat: pd.DataFrame,
     roll_sum_window: int = ROLL_SUM_WINDOW,
@@ -3795,6 +3999,56 @@ def generate_pdf_report(
             fig = plot_fn_10y_rolling_corr(fn_10y_corr, fn_10y_all_sample)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
+
+            # Unified CT10 sensitivity and daily volatility/distribution monitor
+            cross_risk_summary, cross_risk_series = build_cross_structure_ct10_risk_summary(
+                df_basis,
+                g2_fn_perf_data,
+                coupon_swap_data,
+                wide_swap_data,
+                coupon_fly_data,
+            )
+            corr_vol_cols = [
+                "corr_all", *[f"corr_{w}d" for w in G2_FN_CORR_WINDOWS],
+                "mean", "vol_all", *[f"vol_{w}d" for w in G2_FN_CORR_WINDOWS],
+                "p05", "median", "p95",
+            ]
+            family_order = [
+                "Current-coupon basis",
+                "G2/FN relative perf",
+                "Adjacent coupon swap",
+                "100bp coupon swap",
+                "Three-price fly",
+            ]
+            for family in family_order:
+                family_summary = cross_risk_summary[
+                    cross_risk_summary["family"] == family
+                ].drop(columns=["family"])
+                if family_summary.empty:
+                    continue
+                _add_table_page(
+                    pdf,
+                    family_summary,
+                    f"{family}: CT10 Correlation and Daily Volatility",
+                    subtitle=(
+                        "Correlation is versus daily CT10 yield change; all-sample and latest "
+                        "20/40/60 paired observations. Volatility is the standard deviation "
+                        "of the same daily series."
+                    ),
+                    gradient_columns=corr_vol_cols,
+                    diverging_columns=[
+                        "latest", "corr_all", *[f"corr_{w}d" for w in G2_FN_CORR_WINDOWS],
+                        "mean", "p05", "median", "p95",
+                    ],
+                    fontsize=6.5,
+                    row_height=0.045,
+                    pagesize=(17.0, 8.5),
+                    compact=True,
+                    include_index=False,
+                )
+            for fig in plot_cross_structure_distribution_pages(cross_risk_series):
+                pdf.savefig(fig, bbox_inches="tight")
+                plt.close(fig)
         except Exception as exc:
             print(f"Current-coupon basis section skipped: {exc}")
 
@@ -4025,6 +4279,19 @@ def main() -> None:
         cc_rolling = None
         print(f"Current-coupon basis section skipped: {exc}")
 
+    cross_risk_summary = None
+    if df_basis is not None:
+        cross_risk_summary, _ = build_cross_structure_ct10_risk_summary(
+            df_basis,
+            g2_fn_perf_data,
+            coupon_swap_data,
+            wide_swap_data,
+            coupon_fly_data,
+        )
+        cross_risk_summary_path = OUTPUT_DIR / "cross_structure_ct10_corr_daily_vol_summary.csv"
+        cross_risk_summary.to_csv(cross_risk_summary_path, index=False)
+        print(f"Saved cross-structure CT10 correlation and volatility summary: {cross_risk_summary_path}")
+
     pdf_path = generate_pdf_report(dat, df_basis=df_basis)
 
     print("\n" + "=" * 70)
@@ -4048,6 +4315,9 @@ def main() -> None:
     if cc_rolling is not None:
         print(f"\nLatest Rolling Current-Coupon Basis ({CC_ROLLING_WINDOW}d window)")
         print(cc_rolling.tail(2).to_string())
+    if cross_risk_summary is not None:
+        print("\nCross-Structure CT10 Correlation and Daily Volatility")
+        print(cross_risk_summary.to_string(index=False))
     if df_basis is not None:
         spread = df_basis["FNCC"] - df_basis["G2CC"]
         z90 = (spread - spread.rolling(90).mean()) / spread.rolling(90).std()
