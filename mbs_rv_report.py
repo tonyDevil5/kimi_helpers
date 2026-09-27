@@ -6,7 +6,7 @@ Standardized extraction of the post-fName logic from MBS_OAS_RV.ipynb.
 This script loads:
     C:\Users\tonyy\Nutstore\1\python\notebook\data\mbs\mbs_rv.xlsx
 
-and produces a nicely formatted PDF report with:
+and produces a browsable HTML report with:
     - coupon swap / fly z-scores
     - G2/FN swap z-scores
     - historical coupon swap / fly vs CT10 (time series + scatter)
@@ -19,13 +19,17 @@ Run:
     python mbs_rv_report.py
 
 Output:
-    ./mbs_rv_output/MBS_RV_Report.pdf
+    ./mbs_rv_output/MBS_RV_Report_YYYYMMDD.html
+
+Use ``python mbs_rv_report.py --format pdf`` when a PDF copy is needed.
 
 Outputs are written to ./mbs_rv_output/ by default.
 """
 
 from __future__ import annotations
 
+import argparse
+import html
 import warnings
 from datetime import date
 from pathlib import Path
@@ -50,6 +54,9 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # ---------------------------------------------------------------------------
 FNAME = r"C:\Users\tonyy\Nutstore\1\python\notebook\data\mbs\mbs_rv.xlsx"
 OUTPUT_DIR = Path(__file__).parent / "mbs_rv_output"
+DEFAULT_REPORT_FORMAT = "html"
+HTML_IMAGE_DPI = 115
+HTML_WEBP_QUALITY = 82
 
 COUPONS = [3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5]
 COUPON_DROP_Z_WINDOW = 120
@@ -3574,39 +3581,193 @@ def _group_yield_basis_rows(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     return groups
 
 
-def generate_pdf_report(
+def _figure_title(fig, page_number: int) -> str:
+    """Extract a useful navigation label from a matplotlib figure."""
+    if getattr(fig, "_suptitle", None) is not None:
+        title = fig._suptitle.get_text().strip()
+        if title:
+            return title
+    axis_titles = [ax.get_title().strip() for ax in fig.axes if ax.get_title().strip()]
+    if axis_titles:
+        return axis_titles[0]
+    text_items = []
+    for ax in fig.axes:
+        for item in ax.texts:
+            value = item.get_text().strip().splitlines()[0]
+            if value:
+                text_items.append((float(item.get_fontsize()), value))
+    if text_items:
+        return max(text_items, key=lambda item: item[0])[1]
+    return f"Report page {page_number}"
+
+
+def _report_section(title: str) -> str:
+    """Assign a concise sidebar group from a page title."""
+    lower = title.lower()
+    if "appendix" in lower or "historical" in lower or "drop" in lower or "sharpe" in lower:
+        return "Appendix"
+    if "current-coupon" in lower or "current coupon" in lower or "fn basis" in lower:
+        return "Current-coupon basis"
+    if "yield basis" in lower:
+        return "Yield basis"
+    if "g2" in lower and "fn" in lower:
+        return "G2 and FN relative value"
+    if "coupon" in lower or "fly" in lower:
+        return "Coupon structures"
+    if "performance" in lower:
+        return "Performance"
+    return "Overview"
+
+
+class HtmlPages:
+    """Small PdfPages-compatible writer for a lazy-loading HTML report."""
+
+    def __init__(self, html_path: Path, report_title: str, subtitle: str):
+        self.html_path = Path(html_path)
+        self.assets_dir = self.html_path.with_name(f"{self.html_path.stem}_assets")
+        self.report_title = report_title
+        self.subtitle = subtitle
+        self.pages: List[Dict[str, str]] = []
+
+    def __enter__(self):
+        self.html_path.parent.mkdir(parents=True, exist_ok=True)
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
+        for old_page in self.assets_dir.glob("page-*.webp"):
+            old_page.unlink()
+        return self
+
+    def savefig(self, fig, **kwargs) -> None:
+        page_number = len(self.pages) + 1
+        title = _figure_title(fig, page_number)
+        image_name = f"page-{page_number:03d}.webp"
+        image_path = self.assets_dir / image_name
+        save_kwargs = dict(kwargs)
+        save_kwargs.pop("format", None)
+        fig.savefig(
+            image_path,
+            format="webp",
+            dpi=HTML_IMAGE_DPI,
+            facecolor="white",
+            pil_kwargs={"quality": HTML_WEBP_QUALITY, "method": 6},
+            **save_kwargs,
+        )
+        self.pages.append(
+            {
+                "title": title,
+                "section": _report_section(title),
+                "src": f"{self.assets_dir.name}/{image_name}",
+                "id": f"page-{page_number:03d}",
+            }
+        )
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        if exc_type is None:
+            self._write_html()
+        return False
+
+    def _write_html(self) -> None:
+        section_order = []
+        grouped: Dict[str, List[Dict[str, str]]] = {}
+        for page in self.pages:
+            section = page["section"]
+            if section not in grouped:
+                section_order.append(section)
+                grouped[section] = []
+            grouped[section].append(page)
+
+        nav_parts = []
+        for section in section_order:
+            links = "".join(
+                f'<a href="#{page["id"]}" data-search="{html.escape(page["title"].lower())}">'
+                f'<span>{html.escape(page["title"])}</span></a>'
+                for page in grouped[section]
+            )
+            nav_parts.append(
+                f'<div class="nav-group"><h3>{html.escape(section)}</h3>{links}</div>'
+            )
+
+        page_parts = []
+        for number, page in enumerate(self.pages, start=1):
+            title = html.escape(page["title"])
+            page_parts.append(
+                f'<section class="report-page" id="{page["id"]}" '
+                f'data-search="{html.escape(page["title"].lower())}">'
+                f'<div class="page-heading"><span class="page-number">{number:02d}</span>'
+                f'<h2>{title}</h2><a href="{html.escape(page["src"])}" target="_blank" '
+                f'title="Open full-size image">Open image</a></div>'
+                f'<img loading="lazy" decoding="async" src="{html.escape(page["src"])}" alt="{title}">'
+                f'</section>'
+            )
+
+        document = f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(self.report_title)}</title>
+<style>
+:root{{--ink:#17202a;--muted:#64748b;--line:#d9e2ec;--panel:#fff;--bg:#eef2f6;--accent:#174a6e}}
+*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Arial,sans-serif}}
+.sidebar{{position:fixed;inset:0 auto 0 0;width:290px;background:#102b3c;color:#e7f0f5;padding:22px 16px;overflow:auto}}
+.sidebar h1{{font-size:19px;line-height:1.2;margin:0 0 7px}}.subtitle{{font-size:12px;color:#b9cad5;margin-bottom:16px}}
+#filter{{width:100%;padding:9px 10px;border:1px solid #507084;border-radius:7px;background:#fff;color:#17202a;margin-bottom:14px}}
+.nav-group{{margin:13px 0 19px}}.nav-group h3{{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8fc1dc;margin:0 7px 6px}}
+.nav-group a{{display:block;color:#dce9f0;text-decoration:none;padding:6px 8px;border-radius:5px;font-size:12px}}
+.nav-group a:hover{{background:#1e4b65;color:#fff}}.nav-group a.hidden{{display:none}}
+main{{margin-left:290px;padding:22px;max-width:1700px}}.topbar{{display:flex;justify-content:space-between;align-items:center;margin:0 auto 16px;max-width:1380px}}
+.topbar strong{{font-size:13px}}.topbar button{{border:1px solid #b6c5cf;background:#fff;padding:7px 10px;border-radius:6px;cursor:pointer}}
+.report-page{{background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 3px 12px rgba(15,23,42,.06);margin:0 auto 22px;max-width:1380px;scroll-margin-top:12px;overflow:hidden}}
+.page-heading{{display:flex;align-items:center;gap:11px;padding:12px 15px;border-bottom:1px solid var(--line)}}.page-heading h2{{font-size:15px;margin:0;flex:1}}
+.page-heading a{{font-size:12px;color:var(--accent)}}.page-number{{font-size:11px;font-weight:bold;color:#fff;background:var(--accent);border-radius:12px;padding:3px 7px}}
+.report-page img{{display:block;width:100%;height:auto;background:#fff}}.report-page.hidden{{display:none}}
+@media(max-width:850px){{.sidebar{{position:relative;width:auto;max-height:46vh}}main{{margin-left:0;padding:10px}}.topbar{{padding:0 4px}}}}
+@media print{{.sidebar,.topbar{{display:none}}main{{margin:0;padding:0}}.report-page{{break-after:page;box-shadow:none;border:0}}}}
+</style>
+</head>
+<body>
+<aside class="sidebar"><h1>{html.escape(self.report_title)}</h1><div class="subtitle">{html.escape(self.subtitle)} · {len(self.pages)} views</div>
+<input id="filter" type="search" placeholder="Filter sections and charts" aria-label="Filter report">
+<nav>{''.join(nav_parts)}</nav></aside>
+<main><div class="topbar"><strong id="visibleCount">{len(self.pages)} views</strong><button id="topButton">Back to top</button></div>{''.join(page_parts)}</main>
+<script>
+const filter=document.getElementById('filter');
+const pages=[...document.querySelectorAll('.report-page')];
+const links=[...document.querySelectorAll('.nav-group a')];
+filter.addEventListener('input',()=>{{const q=filter.value.trim().toLowerCase();let n=0;pages.forEach(p=>{{const show=!q||p.dataset.search.includes(q);p.classList.toggle('hidden',!show);if(show)n++;}});links.forEach(a=>a.classList.toggle('hidden',q&&!a.dataset.search.includes(q)));document.getElementById('visibleCount').textContent=`${{n}} views`;}});
+document.getElementById('topButton').addEventListener('click',()=>window.scrollTo({{top:0,behavior:'smooth'}}));
+</script>
+</body></html>'''
+        self.html_path.write_text(document, encoding="utf-8")
+
+
+def _default_report_path(stem: str, extension: str) -> Path:
+    """Dated output path, falling back to a timestamped name when locked."""
+    report_date = date.today().strftime("%Y%m%d")
+    report_path = OUTPUT_DIR / f"{stem}_{report_date}.{extension}"
+    # If the dated file is locked, use a timestamped name.
+    if report_path.exists():
+        try:
+            with open(report_path, "ab"):
+                pass
+        except PermissionError:
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_path = OUTPUT_DIR / f"{stem}_{report_date}_{ts}.{extension}"
+    return report_path
+
+
+def _assemble_report_data(
     dat: pd.DataFrame,
     df_basis: Optional[pd.DataFrame] = None,
-    pdf_path: Optional[Path] = None,
-) -> Path:
-    """Generate a single nicely formatted PDF report.
+) -> Dict:
+    """Compute every data payload consumed by the report renderers.
 
-    Parameters
-    ----------
-    dat : pd.DataFrame
-        Main MBS RV data loaded from the Excel file.
-    df_basis : pd.DataFrame, optional
-        Pre-built current-coupon basis DataFrame. If not provided it will be
-        built inside this function (requires Bloomberg access).
-    pdf_path : Path, optional
-        Output PDF path.
+    Sections that are fault-isolated in ``generate_report`` keep the same
+    semantics here: a failure leaves the affected payloads as ``None`` (or a
+    partial list) and prints the same "... skipped" message, so renderers
+    simply skip the missing payloads.
     """
-    if not MATPLOTLIB_AVAILABLE:
-        raise RuntimeError("matplotlib is required for PDF report generation.")
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    if pdf_path is None:
-        report_date = date.today().strftime("%Y%m%d")
-        pdf_path = OUTPUT_DIR / f"MBS_RV_Report_{report_date}.pdf"
-        # If the dated file is locked (e.g., open in a PDF reader), use a timestamped name
-        if pdf_path.exists():
-            try:
-                with open(pdf_path, "ab"):
-                    pass
-            except PermissionError:
-                from datetime import datetime
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                pdf_path = OUTPUT_DIR / f"MBS_RV_Report_{report_date}_{ts}.pdf"
+    payloads: Dict = {"dat": dat, "df_basis": df_basis}
 
     # Build the notebook-style wide cpn/fly summary table and add OLS + range metrics
     cpn_fly_summary = build_cpn_fly_summary_table(dat)
@@ -3651,7 +3812,268 @@ def generate_pdf_report(
     basis_subtitle = "  |  ".join(basis_date_labels)
     basis_score_cols = ["scores_t0"]
 
-    with PdfPages(pdf_path) as pdf:
+    payloads.update(
+        cpn_fly_summary=cpn_fly_summary,
+        score_cols=score_cols,
+        diverging_cols=diverging_cols,
+        gradient_vranges=gradient_vranges,
+        groups=groups,
+        subtitle=subtitle,
+        basis_summary=basis_summary,
+        basis_groups=basis_groups,
+        basis_subtitle=basis_subtitle,
+        basis_score_cols=basis_score_cols,
+    )
+
+    # Performance over periods
+    perf_summary = build_perf_summary_table(dat)
+    perf_cols = [f"{abs(lb)}d" for lb in DEFAULT_PERF_WINDOWS]
+
+    # Rolling performance z-scores
+    rolling_perf_z = build_rolling_perf_zscore_table(dat)
+    rolling_perf_cols = ["latest_perf", f"roll_sum_{ROLL_SUM_WINDOW}d", f"z_score_{ROLL_SUM_Z_WINDOW}d"]
+
+    # G2-minus-FN relative JPM performance and its CT10 sensitivity
+    g2_fn_perf_data = build_g2_fn_jpm_perf_timeseries(dat)
+    g2_fn_perf_summary = build_g2_fn_jpm_perf_summary(g2_fn_perf_data)
+
+    # Adjacent-coupon swaps using JPM daily performance
+    coupon_swap_data = build_coupon_swap_jpm_perf_timeseries(dat)
+    coupon_swap_summary = build_coupon_swap_jpm_perf_summary(coupon_swap_data)
+    coupon_swap_display = coupon_swap_summary.drop(columns=["series_key"])
+
+    # 100-bps-wide coupon swaps using JPM daily performance
+    wide_swap_data = build_wide_coupon_swap_jpm_perf_timeseries(dat)
+    wide_swap_summary = build_wide_coupon_swap_jpm_perf_summary(wide_swap_data)
+    wide_swap_display = wide_swap_summary.drop(columns=["series_key"])
+
+    # Three-price coupon flies using 2*center - lower - upper
+    coupon_fly_data = build_coupon_fly_price_timeseries(dat)
+    coupon_fly_summary = build_coupon_fly_price_summary(coupon_fly_data)
+    coupon_fly_display = coupon_fly_summary.drop(columns=["series_key"])
+
+    payloads.update(
+        perf_summary=perf_summary,
+        perf_cols=perf_cols,
+        rolling_perf_z=rolling_perf_z,
+        rolling_perf_cols=rolling_perf_cols,
+        g2_fn_perf_data=g2_fn_perf_data,
+        g2_fn_perf_summary=g2_fn_perf_summary,
+        coupon_swap_data=coupon_swap_data,
+        coupon_swap_summary=coupon_swap_summary,
+        coupon_swap_display=coupon_swap_display,
+        wide_swap_data=wide_swap_data,
+        wide_swap_summary=wide_swap_summary,
+        wide_swap_display=wide_swap_display,
+        coupon_fly_data=coupon_fly_data,
+        coupon_fly_summary=coupon_fly_summary,
+        coupon_fly_display=coupon_fly_display,
+    )
+
+    # Current-coupon basis OLS (Conventional + Ginnie). Payloads are assigned
+    # in the same order the pages used to be emitted, so a failure leaves
+    # everything not yet computed as None, matching the old try/except cascade.
+    payloads.update(
+        cc_summary=None,
+        cc_subtitle=None,
+        cc_params=None,
+        cc_rolling=None,
+        cc_ma_vol=None,
+        cc_momentum_history=None,
+        cc_momentum_summary=None,
+        fn_10y_corr=None,
+        fn_10y_all_sample=None,
+        fn_10y_corr_summary=None,
+        cross_risk_summary=None,
+        cross_risk_series=None,
+    )
+    try:
+        if df_basis is None:
+            df_basis = build_current_coupon_basis_df(FNAME)
+        payloads["df_basis"] = df_basis
+        payloads["cc_summary"] = build_current_coupon_summary(df_basis)
+        cc_lag_text = " (lagged 1d)" if CC_LAG_PREDICTORS else ""
+        payloads["cc_subtitle"] = (
+            f"Full sample: {df_basis.index[0].date()} to {df_basis.index[-1].date()}  |  "
+            f"Obs: {len(df_basis)}  |  "
+            f"Predictors: 10y, 2s10s, 1y10y_vol{cc_lag_text}"
+        )
+        payloads["cc_params"] = build_current_coupon_params_table(df_basis)
+        payloads["cc_rolling"] = run_rolling_current_coupon_basis(df_basis, window=CC_ROLLING_WINDOW)
+        payloads["cc_ma_vol"] = build_cc_ma_vol_summary(df_basis)
+        cc_momentum_history, cc_momentum_summary = build_cc_momentum(df_basis)
+        payloads["cc_momentum_history"] = cc_momentum_history
+        payloads["cc_momentum_summary"] = cc_momentum_summary
+        payloads["fn_10y_corr"] = build_fn_10y_rolling_corr(df_basis)
+        payloads["fn_10y_all_sample"] = build_fn_10y_all_sample_summary(df_basis)
+        payloads["fn_10y_corr_summary"] = build_fn_10y_corr_summary(payloads["fn_10y_corr"])
+        cross_risk_summary, cross_risk_series = build_cross_structure_ct10_risk_summary(
+            df_basis,
+            g2_fn_perf_data,
+            coupon_swap_data,
+            wide_swap_data,
+            coupon_fly_data,
+        )
+        payloads["cross_risk_summary"] = cross_risk_summary
+        payloads["cross_risk_series"] = cross_risk_series
+    except Exception as exc:
+        print(f"Current-coupon basis section skipped: {exc}")
+
+    # FN/G2 TSY OAS current level vs 1y history z-score
+    payloads.update(oas_df=None, oas_summary=None, oas_subtitle=None)
+    try:
+        oas_df = load_tsy_oas_data(FNAME)
+        oas_summary = build_tsy_oas_summary(oas_df, lookback=TSY_OAS_LOOKBACK)
+        if not oas_summary.empty:
+            payloads["oas_subtitle"] = (
+                f"Latest: {oas_df.index[-1].date()}  |  "
+                f"1y lookback: {TSY_OAS_LOOKBACK} trading days  |  "
+                f"z-score = (current - 1y mean) / 1y std"
+            )
+        payloads["oas_df"] = oas_df
+        payloads["oas_summary"] = oas_summary
+    except Exception as exc:
+        print(f"TSY OAS z-score section skipped: {exc}")
+
+    # Per-coupon yield basis OLS (same predictors as CC basis)
+    payloads.update(
+        cb_basis=None,
+        cb_summary=None,
+        cb_params=None,
+        cb_subtitle=None,
+        cb_coef_matrix=None,
+        cb_feat_cols=None,
+    )
+    try:
+        predictors = load_ust_yield_vol_data(FNAME)
+        cb_basis = build_coupon_basis_df(dat, predictors)
+        if not cb_basis.empty:
+            payloads["cb_basis"] = cb_basis
+            cb_summary = build_coupon_basis_summary(cb_basis)
+            cb_params = build_coupon_basis_params_table(cb_basis)
+            cb_lag_text = " (lagged 1d)" if COUPON_BASIS_LAG_PREDICTORS else ""
+            payloads["cb_subtitle"] = (
+                f"Latest: {cb_basis.index[-1].date()}  |  "
+                f"Obs: {len(cb_basis)}  |  "
+                f"Predictors: 10y, 2s10s, 1y10y_vol{cb_lag_text}"
+            )
+            payloads["cb_summary"] = cb_summary
+            payloads["cb_params"] = cb_params
+            cb_coef_matrix = build_coupon_basis_coef_matrix(cb_basis)
+            payloads["cb_coef_matrix"] = cb_coef_matrix
+            if not cb_coef_matrix.empty:
+                feat_cols_map = {}
+                for feat in COUPON_BASIS_PREDICTORS:
+                    feat_cols = [c for c in cb_coef_matrix.columns if c.endswith(f" {feat}")]
+                    if not feat_cols:
+                        continue
+                    feat_cols_map[feat] = feat_cols
+                payloads["cb_feat_cols"] = feat_cols_map
+    except Exception as exc:
+        print(f"Per-coupon yield basis section skipped: {exc}")
+
+    # Appendix: historical coupon/fly chart inputs for every cpn/fly structure
+    hist_structures = []
+    try:
+        for name in cpn_fly_summary.index:
+            legs = _parse_swap_fly_name(name)
+            if len(legs) == 2:
+                mode = "cpn"
+                pair = (f"{legs[0][0]} {legs[0][1]}", f"{legs[1][0]} {legs[1][1]}")
+                triple = HIST_FLY_TRIPLE
+            elif len(legs) == 3:
+                mode = "fly"
+                pair = HIST_CPN_PAIR
+                triple = (
+                    f"{legs[0][0]} {legs[0][1]}",
+                    f"{legs[1][0]} {legs[1][1]}",
+                    f"{legs[2][0]} {legs[2][1]}",
+                )
+            else:
+                continue
+            hist_structures.append((mode, pair, triple))
+    except Exception as exc:
+        print(f"Historical cpn/fly appendix skipped: {exc}")
+    payloads["hist_structures"] = hist_structures
+
+    return payloads
+
+
+def generate_report(
+    dat: pd.DataFrame,
+    df_basis: Optional[pd.DataFrame] = None,
+    report_path: Optional[Path] = None,
+    report_format: str = DEFAULT_REPORT_FORMAT,
+    payloads: Optional[Dict] = None,
+) -> Path:
+    """Generate the MBS RV report as browsable HTML or a PDF.
+
+    Parameters
+    ----------
+    dat : pd.DataFrame
+        Main MBS RV data loaded from the Excel file.
+    df_basis : pd.DataFrame, optional
+        Pre-built current-coupon basis DataFrame. If not provided it will be
+        built inside this function (requires Bloomberg access).
+    report_path : Path, optional
+        Output HTML or PDF path.
+    report_format : {"html", "pdf"}
+        Output format used when ``report_path`` is omitted.
+    payloads : dict, optional
+        Pre-assembled report data from ``_assemble_report_data``. If not
+        provided it is assembled here, using ``df_basis`` as the starting
+        point for the current-coupon basis section.
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        raise RuntimeError("matplotlib is required for report generation.")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    report_format = report_format.lower()
+    if report_format not in {"html", "pdf"}:
+        raise ValueError("report_format must be 'html' or 'pdf'.")
+    if report_path is None:
+        report_path = _default_report_path("MBS_RV_Report", report_format)
+
+    if payloads is None:
+        payloads = _assemble_report_data(dat, df_basis=df_basis)
+
+    cpn_fly_summary = payloads["cpn_fly_summary"]
+    score_cols = payloads["score_cols"]
+    diverging_cols = payloads["diverging_cols"]
+    gradient_vranges = payloads["gradient_vranges"]
+    groups = payloads["groups"]
+    subtitle = payloads["subtitle"]
+    basis_groups = payloads["basis_groups"]
+    basis_subtitle = payloads["basis_subtitle"]
+    basis_score_cols = payloads["basis_score_cols"]
+    perf_summary = payloads["perf_summary"]
+    perf_cols = payloads["perf_cols"]
+    rolling_perf_z = payloads["rolling_perf_z"]
+    rolling_perf_cols = payloads["rolling_perf_cols"]
+    g2_fn_perf_data = payloads["g2_fn_perf_data"]
+    g2_fn_perf_summary = payloads["g2_fn_perf_summary"]
+    coupon_swap_data = payloads["coupon_swap_data"]
+    coupon_swap_summary = payloads["coupon_swap_summary"]
+    coupon_swap_display = payloads["coupon_swap_display"]
+    wide_swap_data = payloads["wide_swap_data"]
+    wide_swap_summary = payloads["wide_swap_summary"]
+    wide_swap_display = payloads["wide_swap_display"]
+    coupon_fly_data = payloads["coupon_fly_data"]
+    coupon_fly_summary = payloads["coupon_fly_summary"]
+    coupon_fly_display = payloads["coupon_fly_display"]
+    df_basis = payloads["df_basis"]
+
+
+    writer = (
+        HtmlPages(
+            report_path,
+            report_title="MBS RV Analysis Report",
+            subtitle=f"Latest data {dat.index[-1].date()} · {len(dat):,} observations",
+        )
+        if report_format == "html"
+        else PdfPages(report_path)
+    )
+    with writer as pdf:
         # Contents page
         _add_contents_page(pdf, dat, num_cpn_fly_structures=len(cpn_fly_summary))
 
@@ -3861,212 +4283,201 @@ def generate_pdf_report(
 
         # Current-coupon basis OLS (Conventional + Ginnie)
         try:
-            if df_basis is None:
-                df_basis = build_current_coupon_basis_df(FNAME)
-            cc_summary = build_current_coupon_summary(df_basis)
-            cc_lag_text = " (lagged 1d)" if CC_LAG_PREDICTORS else ""
-            cc_subtitle = (
-                f"Full sample: {df_basis.index[0].date()} to {df_basis.index[-1].date()}  |  "
-                f"Obs: {len(df_basis)}  |  "
-                f"Predictors: 10y, 2s10s, 1y10y_vol{cc_lag_text}"
-            )
-            _add_table_page(
-                pdf,
-                cc_summary,
-                "Current-Coupon Basis OLS Summary",
-                subtitle=cc_subtitle,
-                gradient_columns=["diff", "resid_z"],
-                fontsize=9,
-                row_height=0.08,
-                pagesize=(12.0, 4.0),
-                compact=True,
-            )
-
-            # Regression parameters table
-            cc_params = build_current_coupon_params_table(df_basis)
-            _add_table_page(
-                pdf,
-                cc_params,
-                "Current-Coupon Basis OLS Parameters",
-                subtitle=cc_subtitle,
-                gradient_columns=["coef", "p_value"],
-                fontsize=8,
-                row_height=0.06,
-                pagesize=(12.0, 5.5),
-                compact=True,
-                include_index=False,
-            )
-
-            for response_col in ("FNCC", "G2CC"):
-                if response_col in df_basis.columns:
-                    fig = plot_current_coupon_fitted(df_basis, response_col)
-                    pdf.savefig(fig, bbox_inches="tight")
-                    plt.close(fig)
-
-            # Rolling basis OLS actual/fitted/residual plots, one page per index
-            cc_rolling = run_rolling_current_coupon_basis(df_basis, window=CC_ROLLING_WINDOW)
-            for cc_type in ("Conventional", "Ginnie"):
-                fig = plot_rolling_current_coupon_basis(
-                    cc_rolling, cc_type=cc_type, window=CC_ROLLING_WINDOW
-                )
-                pdf.savefig(fig, bbox_inches="tight")
-                plt.close(fig)
-
-            # Conventional vs Ginnie CC OAS spread with 90-day z-score
-            fig = plot_conv_ginnie_cc_spread(df_basis, window=90)
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-            # Moving averages and realized vol
-            cc_ma_vol = build_cc_ma_vol_summary(df_basis)
-            _add_table_page(
-                pdf,
-                cc_ma_vol,
-                "Current-Coupon Basis: Moving Averages & Realized Vol",
-                subtitle=(
-                    f"Latest: {df_basis.index[-1].date()}  |  "
-                    f"d_ma = latest - MA  |  "
-                    f"realized vol = std(daily change), bps/day"
-                ),
-                gradient_columns=[f"vol_{w}d" for w in CC_VOL_WINDOWS],
-                diverging_columns=[f"d_ma_{w}d" for w in CC_MA_WINDOWS],
-                fontsize=9,
-                row_height=0.08,
-                pagesize=(13.0, 4.0),
-                compact=True,
-            )
-            fig = plot_cc_ma_vol(df_basis)
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-            # Current-coupon basis momentum and trend classification
-            cc_momentum_history, cc_momentum_summary = build_cc_momentum(df_basis)
-            _add_table_page(
-                pdf,
-                cc_momentum_summary,
-                "Current-Coupon Basis Momentum Monitor",
-                subtitle=(
-                    f"Latest: {df_basis.index[-1].date()}  |  Positive = widening, negative = tightening  |  "
-                    "Trend direction requires the 20- and 60-observation momentum scores to have the same sign"
-                ),
-                gradient_columns=[
-                    "chg_5d", "chg_20d", "chg_60d",
-                    "slope_20d", "slope_60d", "mom_20d", "mom_60d",
-                ],
-                diverging_columns=[
-                    "chg_5d", "chg_20d", "chg_60d",
-                    "slope_20d", "slope_60d", "mom_20d", "mom_60d",
-                ],
-                fontsize=8,
-                row_height=0.08,
-                pagesize=(16.0, 4.0),
-                compact=True,
-            )
-            fig = plot_cc_momentum(cc_momentum_history, cc_momentum_summary)
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-            # FN current-coupon basis sensitivity to UST 10y yield changes
-            fn_10y_corr = build_fn_10y_rolling_corr(df_basis)
-            fn_10y_all_sample = build_fn_10y_all_sample_summary(df_basis)
-            fn_10y_corr_summary = build_fn_10y_corr_summary(fn_10y_corr)
-            _add_table_page(
-                pdf,
-                fn_10y_corr_summary,
-                "FN Basis vs UST 10y: Rolling Correlation Monitor",
-                subtitle=(
-                    f"Daily changes  |  Latest: {fn_10y_corr.index[-1].date()}  |  "
-                    f"All sample: changes {fn_10y_all_sample['change_corr']:+.3f} "
-                    f"(n={fn_10y_all_sample['change_obs']}), levels "
-                    f"{fn_10y_all_sample['level_corr']:+.3f} "
-                    f"(n={fn_10y_all_sample['level_obs']})  |  "
-                    f"Corr z-score lookback: {CC_FN_10Y_CORR_Z_WINDOW} observations"
-                ),
-                gradient_columns=[
-                    "corr_now", "corr_5ago", "corr_20ago",
-                    f"z_now_{CC_FN_10Y_CORR_Z_WINDOW}", "z_5ago", "z_20ago",
-                ],
-                diverging_columns=[
-                    "corr_now", "corr_5ago", "d_corr_5",
-                    "corr_20ago", "d_corr_20",
-                    f"z_now_{CC_FN_10Y_CORR_Z_WINDOW}", "z_5ago", "z_20ago",
-                ],
-                fontsize=8,
-                row_height=0.08,
-                pagesize=(16.0, 4.0),
-                compact=True,
-            )
-            fig = plot_fn_10y_rolling_corr(fn_10y_corr, fn_10y_all_sample)
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-            # Unified CT10 sensitivity and daily volatility/distribution monitor
-            cross_risk_summary, cross_risk_series = build_cross_structure_ct10_risk_summary(
-                df_basis,
-                g2_fn_perf_data,
-                coupon_swap_data,
-                wide_swap_data,
-                coupon_fly_data,
-            )
-            corr_vol_cols = [
-                "corr_all", *[f"corr_{w}d" for w in G2_FN_CORR_WINDOWS],
-                "mean", "vol_all", *[f"vol_{w}d" for w in G2_FN_CORR_WINDOWS],
-                "p05", "median", "p95",
-            ]
-            family_order = [
-                "Current-coupon basis",
-                "G2/FN relative perf",
-                "Adjacent coupon swap",
-                "100bp coupon swap",
-                "Three-price fly",
-            ]
-            for family in family_order:
-                family_summary = cross_risk_summary[
-                    cross_risk_summary["family"] == family
-                ].drop(columns=["family"])
-                if family_summary.empty:
-                    continue
+            cc_summary = payloads["cc_summary"]
+            if cc_summary is not None:
                 _add_table_page(
                     pdf,
-                    family_summary,
-                    f"{family}: CT10 Correlation and Daily Volatility",
-                    subtitle=(
-                        "Correlation is versus daily CT10 yield change; all-sample and latest "
-                        "20/40/60 paired observations. Volatility is the standard deviation "
-                        "of the same daily series."
-                    ),
-                    gradient_columns=corr_vol_cols,
-                    diverging_columns=[
-                        "latest", "corr_all", *[f"corr_{w}d" for w in G2_FN_CORR_WINDOWS],
-                        "mean", "p05", "median", "p95",
-                    ],
-                    fontsize=6.5,
-                    row_height=0.045,
-                    pagesize=(17.0, 8.5),
+                    cc_summary,
+                    "Current-Coupon Basis OLS Summary",
+                    subtitle=payloads["cc_subtitle"],
+                    gradient_columns=["diff", "resid_z"],
+                    fontsize=9,
+                    row_height=0.08,
+                    pagesize=(12.0, 4.0),
+                    compact=True,
+                )
+
+            # Regression parameters table
+            cc_params = payloads["cc_params"]
+            if cc_params is not None:
+                _add_table_page(
+                    pdf,
+                    cc_params,
+                    "Current-Coupon Basis OLS Parameters",
+                    subtitle=payloads["cc_subtitle"],
+                    gradient_columns=["coef", "p_value"],
+                    fontsize=8,
+                    row_height=0.06,
+                    pagesize=(12.0, 5.5),
                     compact=True,
                     include_index=False,
                 )
-            for fig in plot_cross_structure_distribution_pages(cross_risk_series):
+
+                for response_col in ("FNCC", "G2CC"):
+                    if response_col in df_basis.columns:
+                        fig = plot_current_coupon_fitted(df_basis, response_col)
+                        pdf.savefig(fig, bbox_inches="tight")
+                        plt.close(fig)
+
+            # Rolling basis OLS actual/fitted/residual plots, one page per index
+            cc_rolling = payloads["cc_rolling"]
+            if cc_rolling is not None:
+                for cc_type in ("Conventional", "Ginnie"):
+                    fig = plot_rolling_current_coupon_basis(
+                        cc_rolling, cc_type=cc_type, window=CC_ROLLING_WINDOW
+                    )
+                    pdf.savefig(fig, bbox_inches="tight")
+                    plt.close(fig)
+
+                # Conventional vs Ginnie CC OAS spread with 90-day z-score
+                fig = plot_conv_ginnie_cc_spread(df_basis, window=90)
                 pdf.savefig(fig, bbox_inches="tight")
                 plt.close(fig)
+
+            # Moving averages and realized vol
+            cc_ma_vol = payloads["cc_ma_vol"]
+            if cc_ma_vol is not None:
+                _add_table_page(
+                    pdf,
+                    cc_ma_vol,
+                    "Current-Coupon Basis: Moving Averages & Realized Vol",
+                    subtitle=(
+                        f"Latest: {df_basis.index[-1].date()}  |  "
+                        f"d_ma = latest - MA  |  "
+                        f"realized vol = std(daily change), bps/day"
+                    ),
+                    gradient_columns=[f"vol_{w}d" for w in CC_VOL_WINDOWS],
+                    diverging_columns=[f"d_ma_{w}d" for w in CC_MA_WINDOWS],
+                    fontsize=9,
+                    row_height=0.08,
+                    pagesize=(13.0, 4.0),
+                    compact=True,
+                )
+                fig = plot_cc_ma_vol(df_basis)
+                pdf.savefig(fig, bbox_inches="tight")
+                plt.close(fig)
+
+            # Current-coupon basis momentum and trend classification
+            cc_momentum_history = payloads["cc_momentum_history"]
+            cc_momentum_summary = payloads["cc_momentum_summary"]
+            if cc_momentum_summary is not None:
+                _add_table_page(
+                    pdf,
+                    cc_momentum_summary,
+                    "Current-Coupon Basis Momentum Monitor",
+                    subtitle=(
+                        f"Latest: {df_basis.index[-1].date()}  |  Positive = widening, negative = tightening  |  "
+                        "Trend direction requires the 20- and 60-observation momentum scores to have the same sign"
+                    ),
+                    gradient_columns=[
+                        "chg_5d", "chg_20d", "chg_60d",
+                        "slope_20d", "slope_60d", "mom_20d", "mom_60d",
+                    ],
+                    diverging_columns=[
+                        "chg_5d", "chg_20d", "chg_60d",
+                        "slope_20d", "slope_60d", "mom_20d", "mom_60d",
+                    ],
+                    fontsize=8,
+                    row_height=0.08,
+                    pagesize=(16.0, 4.0),
+                    compact=True,
+                )
+                fig = plot_cc_momentum(cc_momentum_history, cc_momentum_summary)
+                pdf.savefig(fig, bbox_inches="tight")
+                plt.close(fig)
+
+            # FN current-coupon basis sensitivity to UST 10y yield changes
+            fn_10y_corr = payloads["fn_10y_corr"]
+            fn_10y_all_sample = payloads["fn_10y_all_sample"]
+            fn_10y_corr_summary = payloads["fn_10y_corr_summary"]
+            if fn_10y_corr_summary is not None:
+                _add_table_page(
+                    pdf,
+                    fn_10y_corr_summary,
+                    "FN Basis vs UST 10y: Rolling Correlation Monitor",
+                    subtitle=(
+                        f"Daily changes  |  Latest: {fn_10y_corr.index[-1].date()}  |  "
+                        f"All sample: changes {fn_10y_all_sample['change_corr']:+.3f} "
+                        f"(n={fn_10y_all_sample['change_obs']}), levels "
+                        f"{fn_10y_all_sample['level_corr']:+.3f} "
+                        f"(n={fn_10y_all_sample['level_obs']})  |  "
+                        f"Corr z-score lookback: {CC_FN_10Y_CORR_Z_WINDOW} observations"
+                    ),
+                    gradient_columns=[
+                        "corr_now", "corr_5ago", "corr_20ago",
+                        f"z_now_{CC_FN_10Y_CORR_Z_WINDOW}", "z_5ago", "z_20ago",
+                    ],
+                    diverging_columns=[
+                        "corr_now", "corr_5ago", "d_corr_5",
+                        "corr_20ago", "d_corr_20",
+                        f"z_now_{CC_FN_10Y_CORR_Z_WINDOW}", "z_5ago", "z_20ago",
+                    ],
+                    fontsize=8,
+                    row_height=0.08,
+                    pagesize=(16.0, 4.0),
+                    compact=True,
+                )
+                fig = plot_fn_10y_rolling_corr(fn_10y_corr, fn_10y_all_sample)
+                pdf.savefig(fig, bbox_inches="tight")
+                plt.close(fig)
+
+            # Unified CT10 sensitivity and daily volatility/distribution monitor
+            cross_risk_summary = payloads["cross_risk_summary"]
+            cross_risk_series = payloads["cross_risk_series"]
+            if cross_risk_summary is not None:
+                corr_vol_cols = [
+                    "corr_all", *[f"corr_{w}d" for w in G2_FN_CORR_WINDOWS],
+                    "mean", "vol_all", *[f"vol_{w}d" for w in G2_FN_CORR_WINDOWS],
+                    "p05", "median", "p95",
+                ]
+                family_order = [
+                    "Current-coupon basis",
+                    "G2/FN relative perf",
+                    "Adjacent coupon swap",
+                    "100bp coupon swap",
+                    "Three-price fly",
+                ]
+                for family in family_order:
+                    family_summary = cross_risk_summary[
+                        cross_risk_summary["family"] == family
+                    ].drop(columns=["family"])
+                    if family_summary.empty:
+                        continue
+                    _add_table_page(
+                        pdf,
+                        family_summary,
+                        f"{family}: CT10 Correlation and Daily Volatility",
+                        subtitle=(
+                            "Correlation is versus daily CT10 yield change; all-sample and latest "
+                            "20/40/60 paired observations. Volatility is the standard deviation "
+                            "of the same daily series."
+                        ),
+                        gradient_columns=corr_vol_cols,
+                        diverging_columns=[
+                            "latest", "corr_all", *[f"corr_{w}d" for w in G2_FN_CORR_WINDOWS],
+                            "mean", "p05", "median", "p95",
+                        ],
+                        fontsize=6.5,
+                        row_height=0.045,
+                        pagesize=(17.0, 8.5),
+                        compact=True,
+                        include_index=False,
+                    )
+                for fig in plot_cross_structure_distribution_pages(cross_risk_series):
+                    pdf.savefig(fig, bbox_inches="tight")
+                    plt.close(fig)
         except Exception as exc:
             print(f"Current-coupon basis section skipped: {exc}")
 
         # FN/G2 TSY OAS current level vs 1y history z-score
-        try:
-            oas_df = load_tsy_oas_data(FNAME)
-            oas_summary = build_tsy_oas_summary(oas_df, lookback=TSY_OAS_LOOKBACK)
-            if not oas_summary.empty:
-                oas_subtitle = (
-                    f"Latest: {oas_df.index[-1].date()}  |  "
-                    f"1y lookback: {TSY_OAS_LOOKBACK} trading days  |  "
-                    f"z-score = (current - 1y mean) / 1y std"
-                )
+        oas_summary = payloads["oas_summary"]
+        if oas_summary is not None and not oas_summary.empty:
+            try:
                 _add_table_page(
                     pdf,
                     oas_summary.reset_index(),
                     "FN / G2 TSY OAS vs 1-Year History Z-Score",
-                    subtitle=oas_subtitle,
+                    subtitle=payloads["oas_subtitle"],
                     gradient_columns=["z_score"],
                     fontsize=8,
                     row_height=0.05,
@@ -4074,22 +4485,14 @@ def generate_pdf_report(
                     compact=True,
                     include_index=False,
                 )
-        except Exception as exc:
-            print(f"TSY OAS z-score section skipped: {exc}")
+            except Exception as exc:
+                print(f"TSY OAS z-score section skipped: {exc}")
 
         # Per-coupon yield basis OLS (same predictors as CC basis)
         try:
-            predictors = load_ust_yield_vol_data(FNAME)
-            cb_basis = build_coupon_basis_df(dat, predictors)
-            if not cb_basis.empty:
-                cb_summary = build_coupon_basis_summary(cb_basis)
-                cb_params = build_coupon_basis_params_table(cb_basis)
-                cb_lag_text = " (lagged 1d)" if COUPON_BASIS_LAG_PREDICTORS else ""
-                cb_subtitle = (
-                    f"Latest: {cb_basis.index[-1].date()}  |  "
-                    f"Obs: {len(cb_basis)}  |  "
-                    f"Predictors: 10y, 2s10s, 1y10y_vol{cb_lag_text}"
-                )
+            cb_summary = payloads["cb_summary"]
+            if cb_summary is not None:
+                cb_subtitle = payloads["cb_subtitle"]
                 _add_table_page(
                     pdf,
                     cb_summary,
@@ -4101,48 +4504,30 @@ def generate_pdf_report(
                     pagesize=(11.0, 6.0),
                     compact=True,
                 )
-                cb_coef_matrix = build_coupon_basis_coef_matrix(cb_basis)
-                if not cb_coef_matrix.empty:
-                    for feat in COUPON_BASIS_PREDICTORS:
-                        feat_cols = [c for c in cb_coef_matrix.columns if c.endswith(f" {feat}")]
-                        if not feat_cols:
-                            continue
-                        _add_table_page(
-                            pdf,
-                            cb_coef_matrix[feat_cols],
-                            f"Per-Coupon Yield Basis Coefficients — {feat}",
-                            subtitle=cb_subtitle,
-                            gradient_columns=feat_cols,
-                            fontsize=10,
-                            row_height=0.09,
-                            pagesize=(8.0, 4.5),
-                            compact=True,
-                        )
-                for fig in plot_coupon_basis_fitted(cb_basis):
-                    pdf.savefig(fig, bbox_inches="tight")
-                    plt.close(fig)
+                cb_coef_matrix = payloads["cb_coef_matrix"]
+                if cb_coef_matrix is not None:
+                    if not cb_coef_matrix.empty:
+                        for feat, feat_cols in payloads["cb_feat_cols"].items():
+                            _add_table_page(
+                                pdf,
+                                cb_coef_matrix[feat_cols],
+                                f"Per-Coupon Yield Basis Coefficients — {feat}",
+                                subtitle=cb_subtitle,
+                                gradient_columns=feat_cols,
+                                fontsize=10,
+                                row_height=0.09,
+                                pagesize=(8.0, 4.5),
+                                compact=True,
+                            )
+                    for fig in plot_coupon_basis_fitted(payloads["cb_basis"]):
+                        pdf.savefig(fig, bbox_inches="tight")
+                        plt.close(fig)
         except Exception as exc:
             print(f"Per-coupon yield basis section skipped: {exc}")
 
         # Appendix: historical coupon/fly charts for every cpn/fly structure
         try:
-            for name in cpn_fly_summary.index:
-                legs = _parse_swap_fly_name(name)
-                if len(legs) == 2:
-                    mode = "cpn"
-                    pair = (f"{legs[0][0]} {legs[0][1]}", f"{legs[1][0]} {legs[1][1]}")
-                    triple = HIST_FLY_TRIPLE
-                elif len(legs) == 3:
-                    mode = "fly"
-                    pair = HIST_CPN_PAIR
-                    triple = (
-                        f"{legs[0][0]} {legs[0][1]}",
-                        f"{legs[1][0]} {legs[1][1]}",
-                        f"{legs[2][0]} {legs[2][1]}",
-                    )
-                else:
-                    continue
-
+            for mode, pair, triple in payloads["hist_structures"]:
                 fig = plot_historical_cpn_fly(
                     dat,
                     mode=mode,
@@ -4179,7 +4564,16 @@ def generate_pdf_report(
         except Exception as exc:
             print(f"Coupon forward-vol Sharpe proxy appendix skipped: {exc}")
 
-    return pdf_path
+    return report_path
+
+
+def generate_pdf_report(
+    dat: pd.DataFrame,
+    df_basis: Optional[pd.DataFrame] = None,
+    pdf_path: Optional[Path] = None,
+) -> Path:
+    """Backward-compatible PDF-only wrapper."""
+    return generate_report(dat, df_basis=df_basis, report_path=pdf_path, report_format="pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -4222,10 +4616,11 @@ def print_report(
     print("=" * 70)
 
 
-def main() -> None:
+def main(report_format=DEFAULT_REPORT_FORMAT) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    formats = [report_format] if isinstance(report_format, str) else list(report_format)
 
-    # Load data and generate the cpn/fly summary PDF
+    # Load data and generate the cpn/fly report.
     perf_audit_path = OUTPUT_DIR / "coupon_perf_vs_tsy_implied.csv"
     dat = load_mbs_rv(FNAME, perf_audit_path=perf_audit_path)
     perf_audit = pd.read_csv(perf_audit_path, parse_dates=["date"])
@@ -4292,7 +4687,31 @@ def main() -> None:
         cross_risk_summary.to_csv(cross_risk_summary_path, index=False)
         print(f"Saved cross-structure CT10 correlation and volatility summary: {cross_risk_summary_path}")
 
-    pdf_path = generate_pdf_report(dat, df_basis=df_basis)
+    # Assemble all report data once and share it across the requested formats
+    payloads = _assemble_report_data(dat, df_basis=df_basis)
+
+    report_paths = []
+    for fmt in formats:
+        fmt = fmt.lower()
+        if fmt == "interactive":
+            interactive_path = _default_report_path("MBS_RV_Report_Interactive", "html")
+            try:
+                import mbs_rv_interactive
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Interactive report requested but the 'mbs_rv_interactive' module "
+                    "is not available (not yet implemented)."
+                ) from exc
+            try:
+                mbs_rv_interactive.build_interactive_report(payloads, report_path=interactive_path)
+            except NotImplementedError as exc:
+                raise RuntimeError(f"Interactive report is not yet implemented: {exc}") from exc
+            report_paths.append((fmt, interactive_path))
+        else:
+            report_path = generate_report(
+                dat, df_basis=df_basis, report_format=fmt, payloads=payloads
+            )
+            report_paths.append((fmt, report_path))
 
     print("\n" + "=" * 70)
     print("MBS RV Analysis Report")
@@ -4342,9 +4761,19 @@ def main() -> None:
             f"levels {fn_10y_all_sample['level_corr']:+.3f} "
             f"(n={fn_10y_all_sample['level_obs']})"
         )
-    print(f"\nPDF report saved to: {pdf_path}")
+    for fmt, report_path in report_paths:
+        print(f"\n{fmt.upper()} report saved to: {report_path}")
     print("=" * 70)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Generate the MBS RV analysis report.")
+    parser.add_argument(
+        "--format",
+        nargs="+",
+        choices=("html", "pdf", "interactive"),
+        default=[DEFAULT_REPORT_FORMAT],
+        help="Report output format(s): html, pdf and/or interactive (default: html).",
+    )
+    args = parser.parse_args()
+    main(report_format=args.format)

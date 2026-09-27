@@ -6,17 +6,21 @@ Based on D:\python\notebook\ustFairBbg.ipynb.
 1. Pulls market data and builds a fair-value model for 10Y UST yields.
 2. Runs a full-sample OLS regression and reports parameters / VIF.
 3. Uses the user's USTDurationStrategy library to produce rolling market-vs-model values.
-4. Outputs a PDF with tables and plots.
+4. Outputs a PDF with tables and plots, and/or a self-contained interactive HTML report.
 
 Run:
-    python ust_fair_value_report.py
+    python ust_fair_value_report.py                      # PDF (default)
+    python ust_fair_value_report.py --format interactive # interactive HTML
+    python ust_fair_value_report.py --format pdf interactive
 
 Output:
-    ./ust_fair_value_output/UST_FairValue_Report.pdf
+    ./ust_fair_value_output/UST_FairValue_Report_<date>.pdf
+    ./ust_fair_value_output/UST_FairValue_Report_Interactive_<date>.html
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import warnings
 from datetime import date, datetime
@@ -38,8 +42,14 @@ except ImportError:
 
 # Add user's helper library path
 sys.path.append(r"D:\python\pycharm\pythonProject")
-from UstDurationModel import USTDurationStrategy
-from strategy import Context
+try:
+    from UstDurationModel import USTDurationStrategy
+    from strategy import Context
+    UST_LIB_AVAILABLE = True
+except Exception:
+    USTDurationStrategy = None  # type: ignore[misc, assignment]
+    Context = None  # type: ignore[misc, assignment]
+    UST_LIB_AVAILABLE = False
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -69,6 +79,7 @@ FED_HOLDING_TICKER = "FARBNTNM Index"
 PREDICTOR_LIST = [1, 2, 5, 6, 7]  # indices in datFinal
 RESPONSE_IDX = 0
 ROLLING_WINDOW = 250
+FAIR_VALUE_ROLLING_WINDOW = 120  # observations; mirrors the MBS RV fair-value view
 STRAT_PARAMS = (1.25, 0.3, 10, 5)  # openThreshold, closeThreshold, maxHoldingDays, stopLoss
 
 # ---------------------------------------------------------------------------
@@ -117,10 +128,11 @@ def _normalize_bdh(df, tickers=None) -> pd.DataFrame:
         df = df.pivot_table(
             index="date", columns="ticker", values="value", aggfunc="last"
         )
-        df = df.sort_index()
         if tickers is not None:
             df = df.reindex(columns=[t for t in tickers if t in df.columns])
-    return df
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    return df.sort_index()
 
 
 def load_bloomberg_data(start_date: str = START_DATE) -> pd.DataFrame:
@@ -529,6 +541,53 @@ def run_full_sample_regression(dat_final: pd.DataFrame) -> Tuple[sm.regression.l
     return model, vif
 
 
+def run_native_rolling_fair_value(
+    dat_final: pd.DataFrame, window: int = FAIR_VALUE_ROLLING_WINDOW
+) -> pd.DataFrame:
+    """Rolling OLS using the same response and predictors as the full-sample model.
+
+    Each point is an in-window estimate for that date, matching the current-coupon
+    fair-value convention in ``mbs_rv_report``. Yields and residuals are stored in
+    percent; renderers convert residuals to basis points for display.
+    """
+    model_data = pd.concat(
+        [
+            dat_final.iloc[:, RESPONSE_IDX].rename("actual"),
+            dat_final.iloc[:, PREDICTOR_LIST],
+        ],
+        axis=1,
+    ).dropna()
+    if len(model_data) < window:
+        raise ValueError(
+            f"Need at least {window} observations for rolling OLS; got {len(model_data)}"
+        )
+
+    predictor_cols = list(model_data.columns[1:])
+    rows = []
+    for end_idx in range(window, len(model_data) + 1):
+        sample = model_data.iloc[end_idx - window : end_idx]
+        y_win = sample["actual"]
+        x_win = sm.add_constant(sample[predictor_cols], has_constant="add")
+        model = sm.OLS(y_win, x_win).fit()
+        actual = float(y_win.iloc[-1])
+        fitted = float(model.fittedvalues.iloc[-1])
+        residual = actual - fitted
+        resid_std = float(np.std(model.resid))
+        rows.append(
+            {
+                "date": sample.index[-1],
+                "mkt_val": actual,
+                "mdl_val": fitted,
+                "resid": residual,
+                "resid_bps": residual * 100.0,
+                "resid_std": resid_std,
+                "resid_z": residual / resid_std if resid_std != 0 else np.nan,
+                "r2": float(model.rsquared),
+            }
+        )
+    return pd.DataFrame(rows).set_index("date").sort_index()
+
+
 def build_regression_params_table(model) -> pd.DataFrame:
     """Build a clean regression parameters table."""
     params = pd.DataFrame({
@@ -598,6 +657,10 @@ def run_rolling_fair_value(dat_final: pd.DataFrame) -> pd.DataFrame:
     Use USTDurationStrategy to compute rolling market and model values.
     Returns a DataFrame with dates, mktVal, mdlVal, residual, ratio.
     """
+    if not UST_LIB_AVAILABLE:
+        print("USTDurationStrategy library not available; skipping rolling fair-value model.")
+        return pd.DataFrame(columns=["mkt_val", "mdl_val", "resid", "resid_std", "resid_z"])
+
     ust_strat = USTDurationStrategy(*STRAT_PARAMS)
     regression_params = [ROLLING_WINDOW, RESPONSE_IDX, PREDICTOR_LIST]
     strat_cont = Context(ust_strat)
@@ -637,6 +700,10 @@ def run_recent_rolling_fair_value(
     date range and return a DataFrame with market/model values and residuals.
     Residuals are reported in bps (multiplied by 100).
     """
+    if not UST_LIB_AVAILABLE:
+        print("USTDurationStrategy library not available; skipping recent rolling fair-value window.")
+        return pd.DataFrame(columns=["mkt_val", "mdl_val", "resid_bps", "resid_std_bps", "resid_z"])
+
     if end_date is None:
         end_date = date.today()
 
@@ -829,7 +896,7 @@ def plot_fitted_vs_actual(model, dat_final: pd.DataFrame, summary: Optional[Dict
     ax.set_xlabel("Date")
     ax.set_ylabel("Yield (%)")
     ax.set_title("Full-Sample Actual vs Model Fitted 10Y UST Yield")
-    ax.legend()
+    ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
     ax.grid(True, alpha=0.3)
 
     if summary is None:
@@ -936,12 +1003,111 @@ def plot_recent_rolling_residual(recent_df: pd.DataFrame) -> plt.Figure:
 # ---------------------------------------------------------------------------
 # Main report generation
 # ---------------------------------------------------------------------------
+def _default_report_path(stem: str, extension: str) -> Path:
+    """Dated output path, falling back to a timestamped name when locked."""
+    report_date = date.today().strftime("%Y%m%d")
+    report_path = OUTPUT_DIR / f"{stem}_{report_date}.{extension}"
+    # If the dated file is locked, use a timestamped name.
+    if report_path.exists():
+        try:
+            with open(report_path, "ab"):
+                pass
+        except PermissionError:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_path = OUTPUT_DIR / f"{stem}_{report_date}_{ts}.{extension}"
+    return report_path
+
+
+def _assemble_report_data(dat_final: pd.DataFrame) -> Dict:
+    """Compute every data payload consumed by the report renderers.
+
+    Sections that are fault-isolated in ``generate_pdf_report`` keep the same
+    semantics here: a failure leaves the affected payloads as ``None`` (or an
+    empty DataFrame when the USTDurationStrategy library is unavailable) and
+    prints the same "... skipped" message, so renderers simply skip the
+    missing payloads.
+    """
+    print("Running full-sample OLS regression...")
+    model, vif = run_full_sample_regression(dat_final)
+
+    print(f"Running native {FAIR_VALUE_ROLLING_WINDOW}-observation fair-value OLS...")
+    rolling_120_df = run_native_rolling_fair_value(
+        dat_final, window=FAIR_VALUE_ROLLING_WINDOW
+    )
+
+    print("Running rolling fair-value model via USTDurationStrategy...")
+    rolling_df = run_rolling_fair_value(dat_final)
+
+    print("Running recent rolling fair-value window (2025-02-11 onwards)...")
+    recent_df = run_recent_rolling_fair_value(dat_final)
+
+    summary = build_model_summary_dict(model, pd.DataFrame())
+
+    # Use the parameter names as the index so the table has a single feature column
+    params_table = build_regression_params_table(model)
+    params_table = params_table.set_index("parameter").rename_axis("feature")
+
+    stats_table = build_regression_stats_table(model)
+
+    subtitle = (
+        f"Latest: {_idx_date(dat_final.index[-1])}  |  "
+        f"Obs: {summary['obs']}  |  "
+        f"R²: {summary['r_squared']:.3f}  |  "
+        f"Resid Std: {summary['resid_std']:.3f}"
+    )
+
+    payloads: Dict = {
+        "dat_final": dat_final,
+        "model": model,
+        "vif": vif,
+        "summary": summary,
+        "params_table": params_table,
+        "stats_table": stats_table,
+        "subtitle": subtitle,
+        "rolling_df": rolling_df,
+        "rolling_120_df": rolling_120_df,
+        "recent_df": recent_df,
+        "merged_df": None,
+        "curve_summary": None,
+        "curve_subtitle": None,
+        "fly_summary": None,
+        "fly_subtitle": None,
+    }
+
+    print("Building curve-spread / fly dataset...")
+    try:
+        merged_df = build_merged_data(dat_final)
+        payloads["merged_df"] = merged_df
+
+        curve_summary = build_curve_summary_table(merged_df)
+        curve_subtitle = (
+            f"Latest: {_idx_date(merged_df.index[-1])}  |  "
+            f"Obs: {len(merged_df)}  |  "
+            f"Predictors: SOFR 1y1y, 5y5y infl zero, FedHoldRatio, dummy"
+        )
+
+        fly_summary = build_fly_summary_table(merged_df)
+        fly_subtitle = (
+            f"Latest: {_idx_date(merged_df.index[-1])}  |  "
+            f"Obs: {len(merged_df)}  |  "
+            f"Fly = 2 x belly - short - long (bps)  |  "
+            f"beta_10y = sensitivity of daily fly change (bps) to daily GT10 change (bps)"
+        )
+
+        payloads.update(
+            curve_summary=curve_summary,
+            curve_subtitle=curve_subtitle,
+            fly_summary=fly_summary,
+            fly_subtitle=fly_subtitle,
+        )
+    except Exception as exc:
+        print(f"Curve-spread / fly section skipped: {exc}")
+
+    return payloads
+
+
 def generate_pdf_report(
-    dat_final: pd.DataFrame,
-    model,
-    rolling_df: pd.DataFrame,
-    recent_df: Optional[pd.DataFrame] = None,
-    merged_df: Optional[pd.DataFrame] = None,
+    payloads: Dict,
     pdf_path: Optional[Path] = None,
 ) -> Path:
     """Generate the UST fair-value PDF report (including curve spreads and recent rolling window)."""
@@ -950,28 +1116,21 @@ def generate_pdf_report(
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     if pdf_path is None:
-        report_date = date.today().strftime("%Y%m%d")
-        pdf_path = OUTPUT_DIR / f"UST_FairValue_Report_{report_date}.pdf"
-        if pdf_path.exists():
-            try:
-                with open(pdf_path, "ab"):
-                    pass
-            except PermissionError:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                pdf_path = OUTPUT_DIR / f"UST_FairValue_Report_{report_date}_{ts}.pdf"
+        pdf_path = _default_report_path("UST_FairValue_Report", "pdf")
 
-    summary = build_model_summary_dict(model, pd.DataFrame())
-    params_table = build_regression_params_table(model)
-
-    # Use the parameter names as the index so the table has a single feature column
-    params_table = params_table.set_index("parameter").rename_axis("feature")
-
-    subtitle = (
-        f"Latest: {_idx_date(dat_final.index[-1])}  |  "
-        f"Obs: {summary['obs']}  |  "
-        f"R²: {summary['r_squared']:.3f}  |  "
-        f"Resid Std: {summary['resid_std']:.3f}"
-    )
+    dat_final = payloads["dat_final"]
+    model = payloads["model"]
+    summary = payloads["summary"]
+    params_table = payloads["params_table"]
+    stats_table = payloads["stats_table"]
+    subtitle = payloads["subtitle"]
+    rolling_df = payloads["rolling_df"]
+    recent_df = payloads.get("recent_df")
+    merged_df = payloads.get("merged_df")
+    curve_summary = payloads.get("curve_summary")
+    curve_subtitle = payloads.get("curve_subtitle")
+    fly_summary = payloads.get("fly_summary")
+    fly_subtitle = payloads.get("fly_subtitle")
 
     with PdfPages(pdf_path) as pdf:
         # 1. Regression parameters table (compact)
@@ -988,7 +1147,6 @@ def generate_pdf_report(
         )
 
         # 1b. Regression statistics table
-        stats_table = build_regression_stats_table(model)
         _add_table_page(
             pdf,
             stats_table,
@@ -1007,17 +1165,25 @@ def generate_pdf_report(
         plt.close(fig)
 
         # 3. Rolling mkt vs mdl plot
-        fig = plot_rolling_mkt_vs_mdl(rolling_df)
-        pdf.savefig(fig)
-        plt.close(fig)
+        if not rolling_df.empty:
+            fig = plot_rolling_mkt_vs_mdl(rolling_df)
+            pdf.savefig(fig)
+            plt.close(fig)
 
-        # 4. Rolling residual plot
-        fig = plot_rolling_residual(rolling_df)
-        pdf.savefig(fig)
-        plt.close(fig)
+            # 4. Rolling residual plot
+            fig = plot_rolling_residual(rolling_df)
+            pdf.savefig(fig)
+            plt.close(fig)
+        else:
+            fig, ax = plt.subplots(figsize=(11.0, 8.5))
+            ax.text(0.5, 0.5, "Rolling fair-value model skipped\n(USTDurationStrategy library not available)",
+                    fontsize=14, ha="center", va="center", transform=ax.transAxes)
+            ax.axis("off")
+            pdf.savefig(fig)
+            plt.close(fig)
 
         # 4b. Recent rolling market vs model plot (2025-02-11 onwards)
-        if recent_df is not None:
+        if recent_df is not None and not recent_df.empty:
             fig = plot_recent_rolling_mkt_vs_mdl(recent_df)
             pdf.savefig(fig)
             plt.close(fig)
@@ -1028,12 +1194,6 @@ def generate_pdf_report(
 
         # 5. Curve-spread summary table (if Treasury yield data provided)
         if merged_df is not None:
-            curve_summary = build_curve_summary_table(merged_df)
-            curve_subtitle = (
-                f"Latest: {_idx_date(merged_df.index[-1])}  |  "
-                f"Obs: {len(merged_df)}  |  "
-                f"Predictors: SOFR 1y1y, 5y5y infl zero, FedHoldRatio, dummy"
-            )
             _add_table_page(
                 pdf,
                 curve_summary,
@@ -1052,13 +1212,6 @@ def generate_pdf_report(
             plt.close(fig)
 
             # 7. Fly (butterfly) summary table
-            fly_summary = build_fly_summary_table(merged_df)
-            fly_subtitle = (
-                f"Latest: {_idx_date(merged_df.index[-1])}  |  "
-                f"Obs: {len(merged_df)}  |  "
-                f"Fly = 2 x belly - short - long (bps)  |  "
-                f"beta_10y = sensitivity of daily fly change (bps) to daily GT10 change (bps)"
-            )
             _add_table_page(
                 pdf,
                 fly_summary,
@@ -1121,33 +1274,42 @@ def _add_summary_page(pdf: PdfPages, dat_final: pd.DataFrame, summary: Dict, par
     plt.close(fig)
 
 
-def main() -> None:
+def main(report_format="pdf") -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    formats = [report_format] if isinstance(report_format, str) else list(report_format)
 
     df = load_bloomberg_data()
     fed_holdings = load_fed_holdings_data()
     dat_final = build_dat_final(df, fed_holdings)
 
-    print("Running full-sample OLS regression...")
-    model, _ = run_full_sample_regression(dat_final)
+    # Assemble all report data once and share it across the requested formats
+    payloads = _assemble_report_data(dat_final)
 
-    print("Running rolling fair-value model via USTDurationStrategy...")
-    rolling_df = run_rolling_fair_value(dat_final)
+    report_paths = []
+    for fmt in formats:
+        fmt = fmt.lower()
+        if fmt == "interactive":
+            interactive_path = _default_report_path("UST_FairValue_Report_Interactive", "html")
+            try:
+                import ust_fair_value_interactive
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Interactive report requested but the 'ust_fair_value_interactive' "
+                    "module is not available."
+                ) from exc
+            ust_fair_value_interactive.build_interactive_report(
+                payloads, report_path=interactive_path
+            )
+            report_paths.append((fmt, interactive_path))
+        else:
+            print("Generating PDF report...")
+            pdf_path = generate_pdf_report(payloads)
+            report_paths.append((fmt, pdf_path))
 
-    print("Running recent rolling fair-value window (2025-02-11 onwards)...")
-    recent_df = run_recent_rolling_fair_value(dat_final)
-
-    print("Building curve-spread / fly dataset...")
-    merged_df = build_merged_data(dat_final)
-    curve_summary = build_curve_summary_table(merged_df)
-    fly_summary = build_fly_summary_table(merged_df)
-
-    stats_table = build_regression_stats_table(model)
-
-    print("Generating PDF report...")
-    pdf_path = generate_pdf_report(
-        dat_final, model, rolling_df, recent_df=recent_df, merged_df=merged_df
-    )
+    model = payloads["model"]
+    stats_table = payloads["stats_table"]
+    curve_summary = payloads.get("curve_summary")
+    fly_summary = payloads.get("fly_summary")
 
     print("\n" + "=" * 70)
     print("UST 10Y Fair Value OLS Regression Report")
@@ -1157,13 +1319,25 @@ def main() -> None:
     print(f"R-squared   : {model.rsquared:.4f}")
     print("\nRegression Statistics")
     print(stats_table.to_string())
-    print("\nUST Curve Spread Fair-Value Summary")
-    print(curve_summary.to_string())
-    print("\nUST Butterfly Spread Fair-Value Summary")
-    print(fly_summary.to_string())
-    print(f"\nPDF report saved to: {pdf_path}")
+    if curve_summary is not None:
+        print("\nUST Curve Spread Fair-Value Summary")
+        print(curve_summary.to_string())
+    if fly_summary is not None:
+        print("\nUST Butterfly Spread Fair-Value Summary")
+        print(fly_summary.to_string())
+    for fmt, report_path in report_paths:
+        print(f"\n{fmt.upper()} report saved to: {report_path}")
     print("=" * 70)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Generate the UST fair-value report.")
+    parser.add_argument(
+        "--format",
+        nargs="+",
+        choices=("pdf", "interactive"),
+        default=["pdf"],
+        help="Report output format(s): pdf and/or interactive (default: pdf).",
+    )
+    args = parser.parse_args()
+    main(report_format=args.format)

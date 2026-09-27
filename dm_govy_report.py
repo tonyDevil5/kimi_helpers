@@ -12,14 +12,18 @@ across key tenors and produces a compact PDF comparison report:
     - yield-curve snapshot chart
 
 Run:
-    python dm_govy_report.py
+    python dm_govy_report.py                     # PDF (default)
+    python dm_govy_report.py --format interactive
+    python dm_govy_report.py --format pdf interactive
 
 Output:
-    ./dm_govy_output/DM_GOVY_Report.pdf
+    ./dm_govy_output/DM_GOVY_Report_<date>.pdf
+    ./dm_govy_output/DM_GOVY_Report_Interactive_<date>.html
 """
 
 from __future__ import annotations
 
+import argparse
 import warnings
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -171,8 +175,9 @@ def _normalize_bdh(df) -> pd.DataFrame:
         df = df.pivot_table(
             index="date", columns="ticker", values="value", aggfunc="last"
         )
-        df = df.sort_index()
-    return df
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    return df.sort_index()
 
 
 def rename_bbg_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -320,6 +325,8 @@ def build_summary_table(
 
         change_row["rsi"] = rsi.iloc[-1]
         change_row["bb_pos"] = bb_pos
+        change_row["bb_low"] = lower.iloc[-1]
+        change_row["bb_high"] = upper.iloc[-1]
 
         # Realized volatility (annualized, bps)
         rv = compute_realized_volatility(series)
@@ -380,7 +387,7 @@ def build_spread_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     """
     Build a summary table for GT10 vs Bund/OAT/Bono 10Y spreads.
 
-    Columns: level, 1d/1w/1m/3m/6m/1y change (bps), RSI, BB position, RV20.
+    Columns: level, 1d/1w/1m/3m/6m/1y change (bps), RSI, BB position, BB low/high, RV20.
     No carry metrics.
     """
     required = {"us_10y", "dem_10y", "frf_10y", "esp_10y"}
@@ -420,6 +427,8 @@ def build_spread_summary_table(df: pd.DataFrame) -> pd.DataFrame:
 
         change_row["rsi"] = rsi.iloc[-1]
         change_row["bb_pos"] = bb_pos
+        change_row["bb_low"] = lower.iloc[-1]
+        change_row["bb_high"] = upper.iloc[-1]
 
         # Realized volatility (annualized, bps)
         rv = compute_realized_volatility(spread)
@@ -730,26 +739,32 @@ def plot_performance_heatmap(changes: pd.DataFrame, horizon: str = "1m") -> plt.
 # ---------------------------------------------------------------------------
 # Main report generation
 # ---------------------------------------------------------------------------
-def generate_pdf_report(
+def _default_report_path(stem: str, extension: str) -> Path:
+    """Dated output path, falling back to a timestamped name when locked."""
+    report_date = date.today().strftime("%Y%m%d")
+    report_path = OUTPUT_DIR / f"{stem}_{report_date}.{extension}"
+    if report_path.exists():
+        try:
+            with open(report_path, "ab"):
+                pass
+        except PermissionError:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_path = OUTPUT_DIR / f"{stem}_{report_date}_{ts}.{extension}"
+    return report_path
+
+
+def _assemble_report_data(
     df: pd.DataFrame,
     funding_df: Optional[pd.DataFrame] = None,
-    pdf_path: Optional[Path] = None,
-) -> Path:
-    """Generate the DM GOVY comparison PDF report."""
-    if not MATPLOTLIB_AVAILABLE:
-        raise RuntimeError("matplotlib is required for PDF report generation.")
+) -> Dict:
+    """Compute every data payload consumed by the report renderers.
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    if pdf_path is None:
-        report_date = date.today().strftime("%Y%m%d")
-        pdf_path = OUTPUT_DIR / f"DM_GOVY_Report_{report_date}.pdf"
-        if pdf_path.exists():
-            try:
-                with open(pdf_path, "ab"):
-                    pass
-            except PermissionError:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                pdf_path = OUTPUT_DIR / f"DM_GOVY_Report_{report_date}_{ts}.pdf"
+    The spread section is fault-isolated exactly as it was inside
+    ``generate_pdf_report``: a failure leaves ``spread_summary`` as ``None``
+    and prints the same "... skipped" message, so renderers simply skip the
+    missing payloads.
+    """
+    payloads: Dict = {"df": df, "funding_df": funding_df}
 
     summary = build_summary_table(df, funding_df=funding_df)
 
@@ -764,9 +779,9 @@ def generate_pdf_report(
     summary_sorted = summary.loc[sorted(summary.index, key=_sort_key)]
 
     # One compact wide table: all countries/tenors, all metrics
-    base_cols = ["yield"] + [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20", "mom_score", "mom_dir"]
+    base_cols = ["yield"] + [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "bb_low", "bb_high", "rv20", "mom_score", "mom_dir"]
     display_cols = base_cols + (["carry_bps", "carry_ratio"] if funding_df is not None else [])
-    gradient_cols = [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20", "mom_score"]
+    gradient_cols = [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "bb_low", "bb_high", "rv20", "mom_score"]
     if funding_df is not None:
         gradient_cols += ["carry_bps", "carry_ratio"]
     if funding_df is not None:
@@ -775,55 +790,128 @@ def generate_pdf_report(
     else:
         subtitle = f"Latest: {_idx_date(df.index[-1])} | Data start: {_idx_date(df.index[0])}"
 
+    # Compact summary tables split by tenor group
+    tenor_groups: List[Tuple[str, pd.DataFrame]] = []
+    for group_name, group_tenors in [
+        ("2y / 5y / 7y", ["2y", "5y", "7y"]),
+        ("10y / 20y / 30y", ["10y", "20y", "30y"]),
+    ]:
+        mask = summary_sorted.index.map(lambda x: x.split("_")[1] in group_tenors)
+        sub = summary_sorted.loc[mask, display_cols]
+        if sub.empty:
+            continue
+        tenor_groups.append((group_name, sub))
+
+    payloads.update(
+        summary=summary,
+        summary_sorted=summary_sorted,
+        display_cols=display_cols,
+        gradient_cols=gradient_cols,
+        subtitle=subtitle,
+        tenor_groups=tenor_groups,
+    )
+
+    # GT10 vs Bund/OAT/Bono spread summary table (fault-isolated)
+    payloads.update(
+        spread_summary=None,
+        spread_gradient_cols=None,
+        spread_subtitle=None,
+    )
+    try:
+        spread_summary = build_spread_summary_table(df)
+        if not spread_summary.empty:
+            quantile_cols = ["min_1y", "p25_1y", "p50_1y", "p75_1y", "max_1y", "pct_1y"]
+            spread_cols = ["level"] + [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "bb_low", "bb_high", "rv20"] + quantile_cols
+            payloads["spread_summary"] = spread_summary[spread_cols]
+            payloads["spread_gradient_cols"] = [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "bb_low", "bb_high", "rv20", "pct_1y"]
+            payloads["spread_subtitle"] = (
+                f"Latest: {_idx_date(df.index[-1])}  |  "
+                "GT10 vs 10Y Bund / OAT / Bono  |  changes in bps"
+            )
+    except ValueError as exc:
+        print(f"Skipping spread table: {exc}")
+    except Exception as exc:
+        print(f"Skipping spread history plot: {exc}")
+
+    # Recent-window quantile summary by country
+    quantile_summaries = build_quantile_summary_table(df, window=QUANTILE_WINDOW)
+    q_subtitle = f"Latest: {_idx_date(df.index[-1])}  |  Window: last {QUANTILE_WINDOW} observations"
+    quantile_tables: List[Tuple[str, str, pd.DataFrame]] = []
+    for country, q_df in quantile_summaries.items():
+        country_name = COUNTRIES.get(country, country)
+        quantile_tables.append((country, country_name, q_df.reindex(TENORS)))
+
+    payloads.update(
+        quantile_tables=quantile_tables,
+        q_subtitle=q_subtitle,
+    )
+    return payloads
+
+
+def generate_pdf_report(
+    df: pd.DataFrame,
+    funding_df: Optional[pd.DataFrame] = None,
+    pdf_path: Optional[Path] = None,
+    payloads: Optional[Dict] = None,
+) -> Path:
+    """Generate the DM GOVY comparison PDF report.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DM government bond yield data loaded from Bloomberg.
+    funding_df : pd.DataFrame, optional
+        Funding rates used for the carry columns.
+    pdf_path : Path, optional
+        Output PDF path; defaults to the dated path in ``OUTPUT_DIR``.
+    payloads : dict, optional
+        Pre-assembled report data from ``_assemble_report_data``. If not
+        provided it is assembled here.
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        raise RuntimeError("matplotlib is required for PDF report generation.")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if pdf_path is None:
+        pdf_path = _default_report_path("DM_GOVY_Report", "pdf")
+
+    if payloads is None:
+        payloads = _assemble_report_data(df, funding_df=funding_df)
+
     with PdfPages(pdf_path) as pdf:
         # Compact summary tables split by tenor group
-        tenor_groups = [
-            ("2y / 5y / 7y", ["2y", "5y", "7y"]),
-            ("10y / 20y / 30y", ["10y", "20y", "30y"]),
-        ]
-        for group_name, group_tenors in tenor_groups:
-            mask = summary_sorted.index.map(lambda x: x.split("_")[1] in group_tenors)
-            sub = summary_sorted.loc[mask, display_cols]
-            if sub.empty:
-                continue
+        for group_name, sub in payloads["tenor_groups"]:
             _add_table_page(
                 pdf,
                 sub,
                 f"DM Government Bonds — {group_name}",
-                subtitle=subtitle,
-                gradient_columns=gradient_cols,
+                subtitle=payloads["subtitle"],
+                gradient_columns=payloads["gradient_cols"],
                 fontsize=6.5,
                 row_height=0.06,
                 pagesize=(13.0, 8.5),
                 compact=True,
             )
 
-        # GT10 vs Bund/OAT/Bono spread summary table
-        try:
-            spread_summary = build_spread_summary_table(df)
-            if not spread_summary.empty:
-                quantile_cols = ["min_1y", "p25_1y", "p50_1y", "p75_1y", "max_1y", "pct_1y"]
-                spread_cols = ["level"] + [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20"] + quantile_cols
-                _add_table_page(
-                    pdf,
-                    spread_summary[spread_cols],
-                    "GT10 Spread Analysis",
-                    subtitle=f"Latest: {_idx_date(df.index[-1])}  |  GT10 vs 10Y Bund / OAT / Bono  |  changes in bps",
-                    gradient_columns=[f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20", "pct_1y"],
-                    fontsize=8,
-                    row_height=0.10,
-                    pagesize=(13.0, 5.5),
-                    compact=True,
-                )
-
-                # 1-year spread history chart
+        # GT10 vs Bund/OAT/Bono spread summary table + 1-year history chart
+        if payloads.get("spread_summary") is not None:
+            _add_table_page(
+                pdf,
+                payloads["spread_summary"],
+                "GT10 Spread Analysis",
+                subtitle=payloads["spread_subtitle"],
+                gradient_columns=payloads["spread_gradient_cols"],
+                fontsize=8,
+                row_height=0.10,
+                pagesize=(13.0, 5.5),
+                compact=True,
+            )
+            try:
                 fig = plot_spread_history_1y(df)
                 pdf.savefig(fig)
                 plt.close(fig)
-        except ValueError as exc:
-            print(f"Skipping spread table: {exc}")
-        except Exception as exc:
-            print(f"Skipping spread history plot: {exc}")
+            except Exception as exc:
+                print(f"Skipping spread history plot: {exc}")
 
         # Yield curve chart
         fig = plot_yield_curves(df, list(COUNTRIES.keys()))
@@ -831,16 +919,12 @@ def generate_pdf_report(
         plt.close(fig)
 
         # Recent-window quantile summary by country
-        quantile_summaries = build_quantile_summary_table(df, window=QUANTILE_WINDOW)
-        q_subtitle = f"Latest: {_idx_date(df.index[-1])}  |  Window: last {QUANTILE_WINDOW} observations"
-        for country, q_df in quantile_summaries.items():
-            q_df_sorted = q_df.reindex(TENORS)
-            country_name = COUNTRIES.get(country, country)
+        for country, country_name, q_df_sorted in payloads["quantile_tables"]:
             _add_table_page(
                 pdf,
                 q_df_sorted,
                 f"{country_name} — {QUANTILE_WINDOW}-Day Yield Quantiles",
-                subtitle=q_subtitle,
+                subtitle=payloads["q_subtitle"],
                 gradient_columns=["range_pct"],
                 fontsize=9,
                 row_height=0.08,
@@ -895,21 +979,52 @@ def _add_summary_page(pdf: PdfPages, df: pd.DataFrame, summary: pd.DataFrame) ->
     plt.close(fig)
 
 
-def main() -> None:
+def main(report_format: str = "pdf") -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    formats = [report_format] if isinstance(report_format, str) else list(report_format)
 
     df = load_data_from_bloomberg()
     funding_df = load_funding_rates()
-    pdf_path = generate_pdf_report(df, funding_df=funding_df)
+
+    # Assemble all report data once and share it across the requested formats
+    payloads = _assemble_report_data(df, funding_df=funding_df)
+
+    report_paths = []
+    for fmt in formats:
+        fmt = fmt.lower()
+        if fmt == "interactive":
+            interactive_path = _default_report_path("DM_GOVY_Report_Interactive", "html")
+            try:
+                import dm_govy_interactive
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Interactive report requested but the 'dm_govy_interactive' module "
+                    "is not available."
+                ) from exc
+            dm_govy_interactive.build_interactive_report(payloads, report_path=interactive_path)
+            report_paths.append((fmt, interactive_path))
+        else:
+            pdf_path = generate_pdf_report(df, funding_df=funding_df, payloads=payloads)
+            report_paths.append((fmt, pdf_path))
 
     print("\n" + "=" * 70)
     print("DM Government Bond Performance Comparison")
     print("=" * 70)
     print(f"Latest date : {_idx_date(df.index[-1])}")
     print(f"Observations: {len(df)}")
-    print(f"PDF report saved to: {pdf_path}")
+    for fmt, report_path in report_paths:
+        print(f"{fmt.upper()} report saved to: {report_path}")
     print("=" * 70)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Generate the DM GOVY comparison report.")
+    parser.add_argument(
+        "--format",
+        nargs="+",
+        choices=("pdf", "interactive"),
+        default=["pdf"],
+        help="Report output format(s): pdf and/or interactive (default: pdf).",
+    )
+    args = parser.parse_args()
+    main(report_format=args.format)
