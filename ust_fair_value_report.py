@@ -104,6 +104,25 @@ FLY_TRIPLES: List[Tuple[str, str, str, str]] = [
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+def _normalize_bdh(df, tickers=None) -> pd.DataFrame:
+    """Normalize xbbg bdh output to a wide pandas DataFrame.
+
+    xbbg >= 1.x returns a narwhals DataFrame in long format
+    (ticker / date / field / value); older versions return a pandas
+    DataFrame with MultiIndex columns.
+    """
+    if not isinstance(df, pd.DataFrame):
+        df = df.to_pandas()
+    if {"ticker", "date", "field", "value"}.issubset(df.columns):
+        df = df.pivot_table(
+            index="date", columns="ticker", values="value", aggfunc="last"
+        )
+        df = df.sort_index()
+        if tickers is not None:
+            df = df.reindex(columns=[t for t in tickers if t in df.columns])
+    return df
+
+
 def load_bloomberg_data(start_date: str = START_DATE) -> pd.DataFrame:
     """Pull all required tickers from Bloomberg."""
     try:
@@ -114,6 +133,7 @@ def load_bloomberg_data(start_date: str = START_DATE) -> pd.DataFrame:
     end_date = date.today().strftime("%Y-%m-%d")
     print(f"Downloading {len(ALL_TICKERS)} main tickers from Bloomberg...")
     df = blp.bdh(tickers=ALL_TICKERS, flds=["px_last"], start_date=start_date, end_date=end_date)
+    df = _normalize_bdh(df, tickers=ALL_TICKERS)
 
     if isinstance(df.columns, pd.MultiIndex):
         df = df.xs("px_last", axis=1, level=-1)
@@ -141,11 +161,13 @@ def load_fed_holdings_data(start_date: str = START_DATE) -> pd.DataFrame:
 
     print("Downloading UST supply / Fed holdings from Bloomberg...")
     df_total = blp.bdh(tickers=UST_SUPPLY_TICKERS, flds=["px_last"], start_date=start_date, end_date=end_date)
+    df_total = _normalize_bdh(df_total, tickers=UST_SUPPLY_TICKERS)
     df_total.index = pd.to_datetime(df_total.index)
     if isinstance(df_total.columns, pd.MultiIndex):
         df_total.columns = df_total.columns.get_level_values(0)
 
     df_fed = blp.bdh(tickers=[FED_HOLDING_TICKER], flds=["px_last"], start_date=start_date, end_date=end_date)
+    df_fed = _normalize_bdh(df_fed, tickers=[FED_HOLDING_TICKER])
     df_fed.index = pd.to_datetime(df_fed.index)
     if isinstance(df_fed.columns, pd.MultiIndex):
         df_fed.columns = df_fed.columns.get_level_values(0)
@@ -164,7 +186,8 @@ def load_fed_holdings_data(start_date: str = START_DATE) -> pd.DataFrame:
     merged["FedHoldRatio"] = merged[FED_HOLDING_TICKER] / merged["UstTot"]
     merged = merged.dropna()
 
-    result = merged[["index", "FedHoldRatio"]].set_index("index")
+    date_col = merged.columns[0]
+    result = merged[[date_col, "FedHoldRatio"]].set_index(date_col)
     result.index = pd.to_datetime(result.index)
     print(f"Loaded Fed holdings ratio: {len(result)} rows")
     return result
@@ -242,7 +265,9 @@ def load_treasury_yields(start_date: str = START_DATE) -> pd.DataFrame:
         start_date=start_date,
         end_date=end_date,
     )
-    df.columns = df.columns.get_level_values(0)
+    df = _normalize_bdh(df, tickers=TSY_TICKERS)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
     df.index = pd.to_datetime(df.index)
     df["dummy"] = np.where(df.index >= pd.Timestamp(DUMMY_DATE), 1, 0)
     print(f"Loaded Treasury yields: {df.shape[0]} rows x {df.shape[1]} cols")
@@ -269,6 +294,23 @@ def run_curve_ols(
     return Y, model
 
 
+PAST_YEAR_WINDOW = 252
+
+
+def _past_year_percentiles(series: pd.Series, window: int = PAST_YEAR_WINDOW) -> Dict[str, float]:
+    """Return min/25th/50th/75th/max percentiles over the trailing window."""
+    recent = series.dropna().tail(window)
+    if recent.empty:
+        return {"min": np.nan, "p25": np.nan, "p50": np.nan, "p75": np.nan, "max": np.nan}
+    return {
+        "min": float(recent.min()),
+        "p25": float(recent.quantile(0.25)),
+        "p50": float(recent.quantile(0.50)),
+        "p75": float(recent.quantile(0.75)),
+        "max": float(recent.max()),
+    }
+
+
 def build_curve_summary_table(merged_df: pd.DataFrame) -> pd.DataFrame:
     """Summary table for all curve spreads."""
     rows = []
@@ -279,17 +321,17 @@ def build_curve_summary_table(merged_df: pd.DataFrame) -> pd.DataFrame:
         mdl_val = float(model.fittedvalues.iloc[-1])
         diff = mkt_val - mdl_val
         ratio = diff / resid_std if resid_std != 0 else np.nan
-        rows.append(
-            {
-                "curve": name,
-                "mkt_val": mkt_val,
-                "mdl_val": mdl_val,
-                "diff": diff,
-                "resid_std": resid_std,
-                "ratio": ratio,
-                "r2": float(model.rsquared),
-            }
-        )
+        row = {
+            "curve": name,
+            "mkt_val": mkt_val,
+            "mdl_val": mdl_val,
+            "diff": diff,
+            "resid_std": resid_std,
+            "ratio": ratio,
+            "r2": float(model.rsquared),
+        }
+        row.update(_past_year_percentiles(Y))
+        rows.append(row)
     summary = pd.DataFrame(rows).set_index("curve")
     return summary
 
@@ -365,6 +407,30 @@ def run_fly_ols(
     return Y, model
 
 
+def compute_fly_10y_beta(
+    merged_df: pd.DataFrame, short: str, belly: str, long: str
+) -> Tuple[float, float, float]:
+    """Return (beta, r2, p_value) of daily fly change vs daily 10Y UST yield change.
+
+    Fly change and GT10 yield change are both in bps.
+    Regression: Δfly = alpha + beta * ΔGT10 + eps
+    """
+    Y = (2 * merged_df[belly] - merged_df[short] - merged_df[long]) * 100.0
+    fly_chg = Y.diff().dropna()
+    gt10_chg = (merged_df["GT10 Govt"].diff() * 100.0).dropna()
+
+    df = pd.DataFrame({"fly_chg": fly_chg, "gt10_chg": gt10_chg}).dropna()
+    if len(df) < 10:
+        return np.nan, np.nan, np.nan
+
+    X = sm.add_constant(df["gt10_chg"])
+    model = sm.OLS(df["fly_chg"], X).fit()
+    beta = float(model.params["gt10_chg"])
+    r2 = float(model.rsquared)
+    p_value = float(model.pvalues["gt10_chg"])
+    return beta, r2, p_value
+
+
 def build_fly_summary_table(merged_df: pd.DataFrame) -> pd.DataFrame:
     """Summary table for all butterflies."""
     rows = []
@@ -375,17 +441,21 @@ def build_fly_summary_table(merged_df: pd.DataFrame) -> pd.DataFrame:
         mdl_val = float(model.fittedvalues.iloc[-1])
         diff = mkt_val - mdl_val
         ratio = diff / resid_std if resid_std != 0 else np.nan
-        rows.append(
-            {
-                "fly": name,
-                "mkt_val": mkt_val,
-                "mdl_val": mdl_val,
-                "diff": diff,
-                "resid_std": resid_std,
-                "ratio": ratio,
-                "r2": float(model.rsquared),
-            }
-        )
+        beta_10y, beta_r2, beta_p = compute_fly_10y_beta(merged_df, short, belly, long)
+        row = {
+            "fly": name,
+            "mkt_val": mkt_val,
+            "mdl_val": mdl_val,
+            "diff": diff,
+            "resid_std": resid_std,
+            "ratio": ratio,
+            "r2": float(model.rsquared),
+            "beta_10y": beta_10y,
+            "beta_r2": beta_r2,
+            "beta_p": beta_p,
+        }
+        row.update(_past_year_percentiles(Y))
+        rows.append(row)
     summary = pd.DataFrame(rows).set_index("fly")
     return summary
 
@@ -970,10 +1040,10 @@ def generate_pdf_report(
                 "UST Curve Spread Fair-Value Summary",
                 subtitle=curve_subtitle,
                 gradient_columns=["diff", "ratio"],
-                fontsize=9,
+                fontsize=8,
                 row_height=0.07,
-                pagesize=(11.0, 4.5),
-                index_col_width=0.08,
+                pagesize=(13.0, 4.5),
+                index_col_width=0.07,
             )
 
             # 6. Curve-spread fitted-vs-actual plots
@@ -986,18 +1056,19 @@ def generate_pdf_report(
             fly_subtitle = (
                 f"Latest: {_idx_date(merged_df.index[-1])}  |  "
                 f"Obs: {len(merged_df)}  |  "
-                f"Fly = 2 x belly - short - long (bps)"
+                f"Fly = 2 x belly - short - long (bps)  |  "
+                f"beta_10y = sensitivity of daily fly change (bps) to daily GT10 change (bps)"
             )
             _add_table_page(
                 pdf,
                 fly_summary,
                 "UST Butterfly Spread Fair-Value Summary",
                 subtitle=fly_subtitle,
-                gradient_columns=["diff", "ratio"],
-                fontsize=9,
+                gradient_columns=["diff", "ratio", "beta_10y"],
+                fontsize=8,
                 row_height=0.08,
-                pagesize=(9.0, 4.0),
-                index_col_width=0.12,
+                pagesize=(12.0, 4.0),
+                index_col_width=0.10,
             )
 
             # 8. Fly fitted-vs-actual plots

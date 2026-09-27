@@ -3,7 +3,7 @@ DM Government Bond Performance Comparison
 ==========================================
 Based on D:\python\notebook\DM_GOVY.ipynb.
 
-Pulls developed-market government bond yields (US, France, Germany, Japan)
+Pulls developed-market government bond yields (US, France, Germany, Spain, Japan, UK)
 across key tenors and produces a compact PDF comparison report:
     - yield levels and changes over multiple horizons
     - z-scores of yield changes
@@ -47,6 +47,7 @@ COUNTRIES = {
     "us": "United States",
     "frf": "France",
     "dem": "Germany",
+    "esp": "Spain",
     "jpy": "Japan",
     "uk": "United Kingdom",
 }
@@ -56,6 +57,7 @@ TICKERS = {
     "us": ["GT02 Govt", "GT05 Govt", "GT07 Govt", "GT10 Govt", "GT20 Govt", "GT30 Govt"],
     "frf": ["GTFRF2Y Govt", "GTFRF5Y Govt", "GTFRF7Y Govt", "GTFRF10Y Govt", "GTFRF20Y Govt", "GTFRF30Y Govt"],
     "dem": ["GTDEM2Y Govt", "GTDEM5Y Govt", "GTDEM7Y Govt", "GTDEM10Y Govt", "GTDEM20Y Govt", "GTDEM30Y Govt"],
+    "esp": ["GTESP2Y Govt", "GTESP5Y Govt", "GTESP7Y Govt", "GTESP10Y Govt", "GTESP20Y Govt", "GTESP30Y Govt"],
     "jpy": ["GTJPY2Y Govt", "GTJPY5Y Govt", "GTJPY7Y Govt", "GTJPY10Y Govt", "GTJPY20Y Govt", "GTJPY30Y Govt"],
     "uk": ["GUKG2 Index", "GUKG5 Index", "GUKG7 Index", "GUKG10 Index", "GUKG20 Index", "GUKG30 Index"],
 }
@@ -67,13 +69,15 @@ for country, tickers in TICKERS.items():
         TICKER_TO_COL[ticker] = f"{country}_{tenor}"
 
 # Spread analysis uses the existing US 10Y generic yield (us_10y = GT10 Govt)
-# vs Germany 10Y (dem_10y = GTDEM10Y Govt) and France 10Y (frf_10y = GTFRF10Y Govt).
+# vs Germany 10Y (dem_10y = GTDEM10Y Govt), France 10Y (frf_10y = GTFRF10Y Govt),
+# and Spain 10Y (esp_10y = GTESP10Y Govt).
 
 # Currency / funding rate mapping
 CURRENCY = {
     "us": "usd",
     "frf": "eur",
     "dem": "eur",
+    "esp": "eur",
     "jpy": "jpy",
     "uk": "gbp",
 }
@@ -122,6 +126,7 @@ def load_data_from_bloomberg(start_date: str = "2018-05-21") -> pd.DataFrame:
 
     print(f"Downloading {len(all_tickers)} tickers from Bloomberg...")
     df = blp.bdh(tickers=all_tickers, flds=["px_last"], start_date=start_date, end_date=end_date)
+    df = _normalize_bdh(df)
     df = rename_bbg_columns(df)
     df = df.ffill().dropna()
     print(f"Loaded {df.shape[0]} rows x {df.shape[1]} cols")
@@ -140,6 +145,7 @@ def load_funding_rates(start_date: str = "2018-05-21") -> pd.DataFrame:
 
     print(f"Downloading {len(unique_tickers)} funding rate tickers from Bloomberg...")
     df = blp.bdh(tickers=unique_tickers, flds=["px_last"], start_date=start_date, end_date=end_date)
+    df = _normalize_bdh(df)
 
     if isinstance(df.columns, pd.MultiIndex):
         df = df.xs("px_last", axis=1, level=-1)
@@ -149,6 +155,23 @@ def load_funding_rates(start_date: str = "2018-05-21") -> pd.DataFrame:
     df = df.rename(columns=rename_map)
     df = df.ffill().dropna()
     print(f"Loaded funding rates: {df.shape[0]} rows x {df.shape[1]} cols")
+    return df
+
+
+def _normalize_bdh(df) -> pd.DataFrame:
+    """Normalize xbbg bdh output to a wide pandas DataFrame.
+
+    xbbg >= 1.x returns a narwhals DataFrame in long format
+    (ticker / date / field / value); older versions return a pandas
+    DataFrame with MultiIndex columns.
+    """
+    if not isinstance(df, pd.DataFrame):
+        df = df.to_pandas()
+    if {"ticker", "date", "field", "value"}.issubset(df.columns):
+        df = df.pivot_table(
+            index="date", columns="ticker", values="value", aggfunc="last"
+        )
+        df = df.sort_index()
     return df
 
 
@@ -188,6 +211,8 @@ def _parse_bbg_ticker(ticker: str) -> str:
         country = "frf"
     elif "DEM" in t:
         country = "dem"
+    elif "ESP" in t:
+        country = "esp"
     elif "JPY" in t:
         country = "jpy"
     else:
@@ -300,6 +325,24 @@ def build_summary_table(
         rv = compute_realized_volatility(series)
         change_row["rv20"] = rv.iloc[-1]
 
+        # Momentum: multi-horizon change alignment over 1w/1m/3m.
+        # Score in [-3, +3]: +N = yields falling across N horizons
+        # (bullish momentum), -N = yields rising (bearish momentum).
+        mom_horizons = ["1w", "1m", "3m"]
+        signs = [
+            np.sign(changes[(h, col)].iloc[-1])
+            for h in mom_horizons
+            if pd.notna(changes[(h, col)].iloc[-1])
+        ]
+        mom_score = int(-sum(signs)) if signs else np.nan  # -sign: falling yield = +
+        change_row["mom_score"] = mom_score
+        if pd.isna(mom_score) or mom_score == 0:
+            change_row["mom_dir"] = "Mixed"
+        elif abs(mom_score) == len(signs):
+            change_row["mom_dir"] = "Bull" if mom_score > 0 else "Bear"
+        else:
+            change_row["mom_dir"] = "Bullish" if mom_score > 0 else "Bearish"
+
         # Carry profile
         if funding_df is not None:
             country = col.split("_")[0]
@@ -335,12 +378,12 @@ def group_summary_by_tenor(summary: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 # ---------------------------------------------------------------------------
 def build_spread_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build a summary table for GT10 vs Bund/OAT 10Y spreads.
+    Build a summary table for GT10 vs Bund/OAT/Bono 10Y spreads.
 
     Columns: level, 1d/1w/1m/3m/6m/1y change (bps), RSI, BB position, RV20.
     No carry metrics.
     """
-    required = {"us_10y", "dem_10y", "frf_10y"}
+    required = {"us_10y", "dem_10y", "frf_10y", "esp_10y"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns for spread analysis: {missing}")
@@ -348,6 +391,7 @@ def build_spread_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     spread_pairs = {
         "GT10 - Bund10": df["us_10y"] - df["dem_10y"],
         "GT10 - OAT10Y": df["us_10y"] - df["frf_10y"],
+        "GT10 - Bono10Y": df["us_10y"] - df["esp_10y"],
     }
 
     rows = []
@@ -584,8 +628,8 @@ def _add_table_page(
 
 
 def plot_spread_history_1y(df: pd.DataFrame) -> plt.Figure:
-    """Plot 1-year history of GT10 vs Bund10 and GT10 vs OAT10 spreads."""
-    required = {"us_10y", "dem_10y", "frf_10y"}
+    """Plot 1-year history of GT10 vs Bund10, OAT10 and Bono10 spreads."""
+    required = {"us_10y", "dem_10y", "frf_10y", "esp_10y"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns for spread history plot: {missing}")
@@ -597,10 +641,11 @@ def plot_spread_history_1y(df: pd.DataFrame) -> plt.Figure:
     spreads = {
         "GT10 - Bund10": recent["us_10y"] - recent["dem_10y"],
         "GT10 - OAT10Y": recent["us_10y"] - recent["frf_10y"],
+        "GT10 - Bono10Y": recent["us_10y"] - recent["esp_10y"],
     }
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
-    colors = {"GT10 - Bund10": "green", "GT10 - OAT10Y": "red"}
+    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    colors = {"GT10 - Bund10": "green", "GT10 - OAT10Y": "red", "GT10 - Bono10Y": "orange"}
 
     for ax, (name, spread) in zip(axes, spreads.items()):
         spread_bps = spread * 100
@@ -614,13 +659,23 @@ def plot_spread_history_1y(df: pd.DataFrame) -> plt.Figure:
         ax.set_title(f"{name} 1-Year History")
         ax.grid(True, alpha=0.3)
 
-        # Latest annotation
+        # Min / max over the displayed 1-year window
+        min_val = spread_bps.min()
+        max_val = spread_bps.max()
+        min_date = spread_bps.idxmin()
+        max_date = spread_bps.idxmax()
+        ax.axhline(min_val, color=colors.get(name, "blue"), linewidth=0.8, linestyle=":", alpha=0.7)
+        ax.axhline(max_val, color=colors.get(name, "blue"), linewidth=0.8, linestyle=":", alpha=0.7)
+        ax.plot(min_date, min_val, marker="v", color=colors.get(name, "blue"), markersize=6)
+        ax.plot(max_date, max_val, marker="^", color=colors.get(name, "blue"), markersize=6)
+
+        # Latest annotation (now includes min/max info)
         latest = spread_bps.iloc[-1]
         ax.text(
             0.02, 0.95,
-            f"Latest: {latest:.1f} bps",
+            f"Latest: {latest:.1f} bps\nMin: {min_val:.1f} bps ({_idx_date(min_date):%Y-%m-%d})\nMax: {max_val:.1f} bps ({_idx_date(max_date):%Y-%m-%d})",
             transform=ax.transAxes,
-            fontsize=10,
+            fontsize=9,
             verticalalignment="top",
             bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6),
         )
@@ -709,9 +764,9 @@ def generate_pdf_report(
     summary_sorted = summary.loc[sorted(summary.index, key=_sort_key)]
 
     # One compact wide table: all countries/tenors, all metrics
-    base_cols = ["yield"] + [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20"]
+    base_cols = ["yield"] + [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20", "mom_score", "mom_dir"]
     display_cols = base_cols + (["carry_bps", "carry_ratio"] if funding_df is not None else [])
-    gradient_cols = [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20"]
+    gradient_cols = [f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20", "mom_score"]
     if funding_df is not None:
         gradient_cols += ["carry_bps", "carry_ratio"]
     if funding_df is not None:
@@ -743,7 +798,7 @@ def generate_pdf_report(
                 compact=True,
             )
 
-        # GT10 vs Bund/OAT spread summary table
+        # GT10 vs Bund/OAT/Bono spread summary table
         try:
             spread_summary = build_spread_summary_table(df)
             if not spread_summary.empty:
@@ -753,7 +808,7 @@ def generate_pdf_report(
                     pdf,
                     spread_summary[spread_cols],
                     "GT10 Spread Analysis",
-                    subtitle=f"Latest: {_idx_date(df.index[-1])}  |  GT10 vs 10Y Bund / OAT  |  changes in bps",
+                    subtitle=f"Latest: {_idx_date(df.index[-1])}  |  GT10 vs 10Y Bund / OAT / Bono  |  changes in bps",
                     gradient_columns=[f"chg_{h}" for h in HORIZONS] + ["rsi", "bb_pos", "rv20", "pct_1y"],
                     fontsize=8,
                     row_height=0.10,
@@ -825,7 +880,8 @@ def _add_summary_page(pdf: PdfPages, df: pd.DataFrame, summary: pd.DataFrame) ->
     contents = (
         "Report contents:\n"
         "1. Compact DM bond summary table\n"
-        "   (yield, 1d/1w/1m/3m/6m/1y changes, RSI, BB position)\n"
+        "   (yield, 1d/1w/1m/3m/6m/1y changes, RSI, BB position,\n"
+        "    momentum: 1w/1m/3m alignment score, + = yields falling)\n"
         "2. DM yield curve snapshot\n"
         f"3. {QUANTILE_WINDOW}-day yield quantiles by country\n"
         "   (current yield vs min/25%/50%/75%/max)"
