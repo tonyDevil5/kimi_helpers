@@ -15,3 +15,17 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated reports, market-data snapshots and temporary working files
+/mbs_rv_output/
+/ust_fair_value_output/
+/dm_govy_output/
+/adhoc_output/
+/fed_funds_output/
+/outputs/
+/tmp/
+/cta/walkforward_output/
+/fed-hike-html/dist/
+/FN_Basis_E19_Analogues.pdf
+/FN_Basis_Shocks.pdf
+/basis_analysis_20260919.pdf

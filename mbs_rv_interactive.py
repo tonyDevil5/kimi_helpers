@@ -1568,9 +1568,11 @@ main{margin-left:290px;padding:22px;max-width:1700px}.topbar{display:flex;justif
 .view-subtitle{font-size:12px;color:var(--muted);margin:2px 0 10px}
 .table-wrap{overflow:auto;max-height:82vh;border:1px solid var(--line);border-radius:6px}
 .data-table{border-collapse:collapse;font-size:12px;min-width:100%}
-.data-table th{background:#40466e;color:#fff;padding:5px 7px;position:sticky;top:0;font-weight:bold;text-align:center;white-space:nowrap;z-index:1}
+.data-table th{background:#40466e;color:#fff;padding:5px 22px 5px 7px;position:sticky;top:0;font-weight:bold;text-align:center;white-space:nowrap;z-index:1;cursor:pointer;user-select:none}
+.data-table th::after{content:"↕";position:absolute;right:6px;color:#b8c2d8;font-size:10px}.data-table th.sort-asc::after{content:"▲";color:#fff}.data-table th.sort-desc::after{content:"▼";color:#fff}
 .data-table td{border:1px solid #e2e8f0;padding:3px 7px;text-align:center;white-space:nowrap}
 .data-table tbody tr:nth-child(even){background:#f0f0f0}
+.table-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 9px}.table-tools input{min-width:240px;flex:1;max-width:480px;padding:7px 9px;border:1px solid #b6c5cf;border-radius:6px}.table-tools button{border:1px solid #b6c5cf;background:#fff;padding:7px 10px;border-radius:6px;cursor:pointer}.table-tools button:hover{background:#eef2f6}.table-count{font-size:12px;color:var(--muted);margin-left:auto}
 .dropdown-bar{margin:2px 0 12px;font-size:13px}
 .dropdown-bar select{padding:6px 8px;border:1px solid #b6c5cf;border-radius:6px;font-size:13px;min-width:240px;background:#fff}
 .overview h1{font-size:24px;margin:8px 0 4px;text-align:center}
@@ -1591,6 +1593,20 @@ document.querySelectorAll('.chart:not(.dd-fig)').forEach(el=>renderChart(el.id))
 document.querySelectorAll('.dd-fig').forEach(el=>{if(el.style.display!=='none')renderChart(el.id);});
 document.querySelectorAll('select.dd-select').forEach(sel=>{sel.addEventListener('change',()=>{
 document.querySelectorAll('.dd-fig[data-select="'+sel.id+'"]').forEach(d=>{const on=d.dataset.value===sel.value;d.style.display=on?'':'none';if(on)renderChart(d.id);});});});
+function cellValue(cell){const text=cell.textContent.trim().replace(/,/g,'');if(text==='')return {blank:true,num:false,value:''};const n=Number(text.replace(/%$/,''));return Number.isFinite(n)?{blank:false,num:true,value:n}:{blank:false,num:false,value:text.toLowerCase()};}
+function csvCell(value){return '"'+value.replace(/"/g,'""')+'"';}
+document.querySelectorAll('.data-table').forEach((table,tableIndex)=>{
+const wrap=table.closest('.table-wrap');if(!wrap)return;const rows=[...table.tBodies[0].rows];const tools=document.createElement('div');tools.className='table-tools';
+const search=document.createElement('input');search.type='search';search.placeholder='Filter this table';search.setAttribute('aria-label','Filter this table');
+const reset=document.createElement('button');reset.type='button';reset.textContent='Reset sort';
+const csv=document.createElement('button');csv.type='button';csv.textContent='Download CSV';
+const count=document.createElement('span');count.className='table-count';tools.append(search,reset,csv,count);wrap.parentNode.insertBefore(tools,wrap);
+const refresh=()=>{let shown=0;rows.forEach(row=>{if(row.style.display!=='none')shown++;});count.textContent=`${shown} of ${rows.length} rows`;};refresh();
+search.addEventListener('input',()=>{const q=search.value.trim().toLowerCase();rows.forEach(row=>{row.style.display=(!q||row.textContent.toLowerCase().includes(q))?'':'none';});refresh();});
+table.querySelectorAll('th').forEach((th,col)=>th.addEventListener('click',()=>{const asc=!th.classList.contains('sort-asc');table.querySelectorAll('th').forEach(h=>h.classList.remove('sort-asc','sort-desc'));th.classList.add(asc?'sort-asc':'sort-desc');const sorted=[...rows].sort((a,b)=>{const av=cellValue(a.cells[col]),bv=cellValue(b.cells[col]);if(av.blank!==bv.blank)return av.blank?1:-1;let c;if(av.num&&bv.num)c=av.value-bv.value;else c=String(av.value).localeCompare(String(bv.value));return asc?c:-c;});sorted.forEach(row=>table.tBodies[0].appendChild(row));}));
+reset.addEventListener('click',()=>{rows.forEach(row=>table.tBodies[0].appendChild(row));table.querySelectorAll('th').forEach(h=>h.classList.remove('sort-asc','sort-desc'));});
+csv.addEventListener('click',()=>{const lines=[];lines.push([...table.tHead.rows[0].cells].map(c=>csvCell(c.textContent.trim())).join(','));[...table.tBodies[0].rows].filter(r=>r.style.display!=='none').forEach(r=>lines.push([...r.cells].map(c=>csvCell(c.textContent.trim())).join(',')));const blob=new Blob([lines.join('\\n')],{type:'text/csv;charset=utf-8'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`mbs-rv-table-${String(tableIndex+1).padStart(2,'0')}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);});
+});
 const filter=document.getElementById('filter');
 const pages=[...document.querySelectorAll('.report-page')];
 const links=[...document.querySelectorAll('.nav-group a')];

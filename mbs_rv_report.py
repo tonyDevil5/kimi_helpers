@@ -6,7 +6,7 @@ Standardized extraction of the post-fName logic from MBS_OAS_RV.ipynb.
 This script loads:
     C:\Users\tonyy\Nutstore\1\python\notebook\data\mbs\mbs_rv.xlsx
 
-and produces a browsable HTML report with:
+and produces a browsable interactive HTML report with:
     - coupon swap / fly z-scores
     - G2/FN swap z-scores
     - historical coupon swap / fly vs CT10 (time series + scatter)
@@ -21,7 +21,8 @@ Run:
 Output:
     ./mbs_rv_output/MBS_RV_Report_YYYYMMDD.html
 
-Use ``python mbs_rv_report.py --format pdf`` when a PDF copy is needed.
+Use ``python mbs_rv_report.py --format html`` for the lightweight static
+gallery or ``python mbs_rv_report.py --format pdf`` when a PDF copy is needed.
 
 Outputs are written to ./mbs_rv_output/ by default.
 """
@@ -54,7 +55,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # ---------------------------------------------------------------------------
 FNAME = r"C:\Users\tonyy\Nutstore\1\python\notebook\data\mbs\mbs_rv.xlsx"
 OUTPUT_DIR = Path(__file__).parent / "mbs_rv_output"
-DEFAULT_REPORT_FORMAT = "html"
+DEFAULT_REPORT_FORMAT = "interactive"
 HTML_IMAGE_DPI = 115
 HTML_WEBP_QUALITY = 82
 
@@ -419,6 +420,16 @@ def load_ust_yield_vol_data(fpath: str | Path = FNAME) -> pd.DataFrame:
     df = df.rename(columns={date_col: "date"})
     df["date"] = pd.to_datetime(df["date"])
     df = df.dropna(subset=["date"]).set_index("date").sort_index()
+
+    if "10y" not in df.columns:
+        # Newer workbook layout dropped the 10y column from Data1; fall back
+        # to CT10 on the Data tab.
+        data_tab = pd.read_excel(fpath, sheet_name="Data")
+        data_tab = data_tab.rename(columns={data_tab.columns[0]: "date"})
+        ct10 = data_tab[["date", "CT10"]].copy()
+        ct10["date"] = pd.to_datetime(ct10["date"])
+        ct10 = ct10.dropna(subset=["date"]).set_index("date").sort_index()
+        df = df.join(ct10["CT10"].rename("10y"), how="left")
 
     # 2s10s slope = 10y - 2y; 1y10y vol from the ATM column
     predictors = pd.DataFrame(
@@ -4694,7 +4705,7 @@ def main(report_format=DEFAULT_REPORT_FORMAT) -> None:
     for fmt in formats:
         fmt = fmt.lower()
         if fmt == "interactive":
-            interactive_path = _default_report_path("MBS_RV_Report_Interactive", "html")
+            interactive_path = _default_report_path("MBS_RV_Report", "html")
             try:
                 import mbs_rv_interactive
             except ImportError as exc:
