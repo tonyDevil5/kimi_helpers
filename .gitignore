@@ -6,6 +6,7 @@ __pycache__/
 
 # Virtual environments
 venv/
+.venv/
 .env/
 
 # IDE
@@ -19,6 +20,7 @@ Thumbs.db
 # Generated reports, market-data snapshots and temporary working files
 /mbs_rv_output/
 /ust_fair_value_output/
+/ust_technical_output/
 /dm_govy_output/
 /adhoc_output/
 /fed_funds_output/
