@@ -24,6 +24,9 @@ Thumbs.db
 /dm_govy_output/
 /adhoc_output/
 /fed_funds_output/
+/fund_flows_output/
+/fund_sensitivity_output/
+/fund_flow_forward_output/
 /outputs/
 /tmp/
 /cta/walkforward_output/
