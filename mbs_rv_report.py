@@ -4,7 +4,7 @@ MBS RV Analysis Report
 Standardized extraction of the post-fName logic from MBS_OAS_RV.ipynb.
 
 This script loads:
-    C:\Users\tonyy\Nutstore\1\python\notebook\data\mbs\mbs_rv.xlsx
+    D:\python\notebook\data\mbs\mbs_rv.xlsx
 
 and produces a browsable interactive HTML report with:
     - coupon swap / fly z-scores
@@ -53,13 +53,23 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-FNAME = r"C:\Users\tonyy\Nutstore\1\python\notebook\data\mbs\mbs_rv.xlsx"
+FNAME = r"D:\python\notebook\data\mbs\mbs_rv.xlsx"
+CITI_FNAME = r"D:\python\notebook\data\mbs\mbs_rv_citi.xlsx"
+
+# Citi performance vs 7Y UST: threshold (in ticks) for "extreme divergence" signal
+CITI_PERF_EXTREME_GAP_TICKS = 25.0
+# If True, cumulative windows (5d, 30d, MTD, YTD) and signal exclude the latest day's value.
+CITI_PERF_IGNORE_LATEST_DAY = True
+# Intraday sheet holds hourly snapshots of the same perf tickers; the 5am mark
+# of the current date is appended as the latest day of the perf table.
+CITI_INTRADAY_SHEET = "Sheet6"
+CITI_INTRADAY_HOUR = 5
 OUTPUT_DIR = Path(__file__).parent / "mbs_rv_output"
 DEFAULT_REPORT_FORMAT = "interactive"
 HTML_IMAGE_DPI = 115
 HTML_WEBP_QUALITY = 82
 
-COUPONS = [3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5]
+COUPONS = [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5]
 COUPON_DROP_Z_WINDOW = 120
 COUPON_SHARPE_VOL_WINDOW = 60
 COUPON_SHARPE_MONTH_DAYS = 21
@@ -96,9 +106,11 @@ COUPON_SWAP_PAIRS = list(zip(COUPONS[1:], COUPONS[:-1]))
 WIDE_COUPON_SWAP_PAIRS = [
     (6.5, 5.5), (6.0, 5.0), (5.5, 4.5),
     (5.0, 4.0), (4.5, 3.5), (4.0, 3.0),
+    (3.5, 2.5), (3.0, 2.0),
 ]
 COUPON_FLY_CENTERS = COUPONS[1:-1]
 STRUCTURE_RECENT_PLOT_WINDOW = 120
+STRUCTURE_MOM_WINDOWS = [20, 60]      # momentum horizons for swap/fly trend monitors
 
 # Current-coupon basis analysis
 CC_TICKERS = {
@@ -358,7 +370,10 @@ def load_tsy_oas_data(fpath: str | Path = FNAME) -> pd.DataFrame:
 
     oas_cols = [c for c in df.columns if c.endswith(" TSY OAS")]
     oas_df = df[oas_cols].copy()
-    oas_df = oas_df.dropna()
+    # Keep every date where at least one coupon has a mark; each series is
+    # dropped to its own valid history in build_tsy_oas_summary so a short
+    # new coupon cannot truncate the rest of the table.
+    oas_df = oas_df.dropna(how="all")
     print(f"Loaded TSY OAS data: {oas_df.shape[0]} rows x {oas_df.shape[1]} cols, "
           f"{oas_df.index[0].date()} to {oas_df.index[-1].date()}")
     return oas_df
@@ -379,7 +394,7 @@ def build_tsy_oas_summary(oas_df: pd.DataFrame, lookback: int = TSY_OAS_LOOKBACK
     rows = []
     for col in sorted(oas_df.columns):
         agency, coupon = _parse_oas_col_name(col)
-        series = oas_df[col]
+        series = oas_df[col].dropna()
         if len(series) < lookback:
             continue
         hist = series.iloc[-lookback:]
@@ -387,14 +402,307 @@ def build_tsy_oas_summary(oas_df: pd.DataFrame, lookback: int = TSY_OAS_LOOKBACK
         hist_mean = float(hist.mean())
         hist_std = float(hist.std(ddof=1))
         zscore = (current - hist_mean) / hist_std if hist_std != 0 else np.nan
+        changes = {
+            f"chg_{n}d": (
+                current - float(series.iloc[-1 - n]) if len(series) > n else np.nan
+            )
+            for n in (5, 10, 20)
+        }
         rows.append({
             "agency": agency,
             "coupon": coupon,
             "current_oas": current,
+            **changes,
             "hist_mean": hist_mean,
             "hist_std": hist_std,
             "z_score": zscore,
             "obs": len(hist),
+        })
+
+    summary = pd.DataFrame(rows)
+    if summary.empty:
+        return summary
+    summary = summary.sort_values(["agency", "coupon"]).set_index(["agency", "coupon"])
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Citi MBS OAS summary
+# ---------------------------------------------------------------------------
+def load_citi_oas_data(fpath: str | Path = CITI_FNAME) -> pd.DataFrame:
+    """Load Citi MBS OAS data from mbs_rv_citi.xlsx.
+
+    Row 1 contains headers like:
+      RATES.MBS.MBS_FIXED_RATE.FNMA.MBS_CPN_2_5.30Y.T_OAS - CLOSE
+      RATES.MBS.MBS_FIXED_RATE.GNMA_II.MBS_CPN_2_5.30Y.T_OAS - CLOSE
+    """
+    fpath = Path(fpath)
+    if not fpath.exists():
+        raise FileNotFoundError(f"Citi OAS file not found: {fpath}")
+
+    df = pd.read_excel(fpath, sheet_name=0, header=1)
+    date_col = df.columns[0]
+    df = df.rename(columns={date_col: "date"})
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+
+    rename_map = {}
+    for col in df.columns:
+        col_str = str(col)
+        if "T_OAS" not in col_str:
+            continue
+        if "FNMA" in col_str:
+            agency = "FN"
+        elif "GNMA_II" in col_str:
+            agency = "G2"
+        else:
+            continue
+        # Extract coupon from "MBS_CPN_X_Y"
+        import re
+        m = re.search(r"MBS_CPN_(\d+)_(\d+)", col_str)
+        if m:
+            coupon = float(f"{m.group(1)}.{m.group(2)}")
+            rename_map[col] = f"{agency} {coupon:g}"
+
+    df = df[list(rename_map.keys())].rename(columns=rename_map)
+    df = df.dropna(how="all")
+    print(f"Loaded Citi OAS data: {df.shape[0]} rows x {df.shape[1]} cols, "
+          f"{df.index[0].date()} to {df.index[-1].date()}")
+    return df
+
+
+def build_citi_oas_summary(oas_df: pd.DataFrame, lookback: int = 90) -> pd.DataFrame:
+    """Latest OAS and z-score vs trailing 90-day history for each FN/G2 coupon."""
+    rows = []
+    for col in sorted(oas_df.columns):
+        agency, coupon = col.split()
+        coupon = float(coupon)
+        series = oas_df[col].dropna()
+        if len(series) < lookback:
+            continue
+        hist = series.iloc[-lookback:]
+        current = float(series.iloc[-1])
+        hist_mean = float(hist.mean())
+        hist_std = float(hist.std(ddof=1))
+        zscore = (current - hist_mean) / hist_std if hist_std != 0 else np.nan
+        changes = {
+            f"chg_{n}d": (
+                current - float(series.iloc[-1 - n]) if len(series) > n else np.nan
+            )
+            for n in (5, 10, 20)
+        }
+        rows.append({
+            "agency": agency,
+            "coupon": coupon,
+            "latest_oas": current,
+            **changes,
+            "hist_mean": hist_mean,
+            "hist_std": hist_std,
+            "z_score_90d": zscore,
+        })
+
+    summary = pd.DataFrame(rows)
+    if summary.empty:
+        return summary
+    summary = summary.sort_values(["agency", "coupon"]).set_index(["agency", "coupon"])
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Citi MBS performance vs 7Y UST (Sheet3)
+# ---------------------------------------------------------------------------
+def _parse_citi_perf_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Reduce raw Citi perf columns to agency/coupon labels.
+
+    Shared by the daily sheet (Sheet3) and the intraday sheet (Sheet6), which
+    use the same ticker layout.
+    """
+    rename_map = {}
+    for col in df.columns:
+        col_str = str(col)
+        if "FNMA" in col_str:
+            agency = "FN"
+        elif "GNMA_II" in col_str:
+            agency = "G2"
+        else:
+            continue
+        import re
+        m = re.search(r"MBS_CPN_(\d+)_(\d+)", col_str)
+        if m:
+            coupon = float(f"{m.group(1)}.{m.group(2)}")
+            rename_map[col] = f"{agency} {coupon:g}"
+
+    return df[list(rename_map.keys())].rename(columns=rename_map)
+
+
+def load_citi_perf_data(fpath: str | Path = CITI_FNAME) -> pd.DataFrame:
+    """Load Citi MBS performance vs 7Y UST from mbs_rv_citi.xlsx Sheet3.
+
+    Row 1 contains headers like:
+      RATES.MBS.MBS_PERF.FNMA.30Y.MBS_CPN_2_5.VS_7S_UST.DESK - CLOSE
+    """
+    fpath = Path(fpath)
+    if not fpath.exists():
+        raise FileNotFoundError(f"Citi file not found: {fpath}")
+
+    df = pd.read_excel(fpath, sheet_name="Sheet3", header=1)
+    date_col = df.columns[0]
+    df = df.rename(columns={date_col: "date"})
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+
+    df = _parse_citi_perf_columns(df)
+    df = df.dropna(how="all")
+    print(f"Loaded Citi performance data: {df.shape[0]} rows x {df.shape[1]} cols, "
+          f"{df.index[0].date()} to {df.index[-1].date()}")
+    return df
+
+
+def load_citi_perf_intraday(
+    fpath: str | Path = CITI_FNAME,
+    sheet: str = CITI_INTRADAY_SHEET,
+    hour: int = CITI_INTRADAY_HOUR,
+) -> pd.DataFrame:
+    """Load the current-day intraday Citi perf mark from the intraday sheet.
+
+    The intraday sheet holds hourly snapshots of the same perf tickers as
+    Sheet3. The preferred mark is the ``hour`` (5am) row of the latest date;
+    if that row is missing, the latest hourly row of that date is used.
+    Returns a one-row DataFrame indexed by the mark date (midnight), or an
+    empty DataFrame when the sheet is absent or empty.
+    """
+    fpath = Path(fpath)
+    if not fpath.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_excel(fpath, sheet_name=sheet, header=1)
+    except ValueError:
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+
+    date_col = df.columns[0]
+    df = df.rename(columns={date_col: "date"})
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    tickers = _parse_citi_perf_columns(df.drop(columns="date"))
+    df = pd.concat([df[["date"]], tickers], axis=1)
+
+    latest_date = df["date"].dt.normalize().max()
+    day = df[df["date"].dt.normalize() == latest_date]
+    preferred = day[day["date"].dt.hour == hour]
+    mark = preferred.iloc[-1] if not preferred.empty else day.iloc[-1]
+
+    out = mark.drop(labels="date").to_frame().T.apply(pd.to_numeric, errors="coerce")
+    out.index = pd.DatetimeIndex([latest_date], name="date")
+    print(f"Loaded Citi intraday mark ({sheet}): {mark['date']} "
+          f"({out.shape[1]} coupons)")
+    return out
+
+
+def combine_citi_perf_history(
+    perf_df: pd.DataFrame, intraday_df: Optional[pd.DataFrame] = None
+) -> pd.DataFrame:
+    """Final daily perf series: Sheet3 history plus the current-day intraday mark.
+
+    The Sheet3 latest day is dropped when CITI_PERF_IGNORE_LATEST_DAY is set.
+    The intraday mark is appended only when it is strictly newer than the full
+    daily history, so a stale intraday sheet can never reintroduce an ignored day.
+    """
+    append_intraday = (
+        intraday_df is not None
+        and not intraday_df.empty
+        and intraday_df.index[-1] > perf_df.index[-1]
+    )
+    combined = perf_df
+    if CITI_PERF_IGNORE_LATEST_DAY and len(combined) > 1:
+        combined = combined.iloc[:-1]
+    if append_intraday:
+        combined = pd.concat([combined, intraday_df])
+    return combined
+
+
+def classify_citi_perf_signal(last_5d: float, last_30d: float, extreme_threshold: float = CITI_PERF_EXTREME_GAP_TICKS) -> str:
+    """
+    Classify 5d vs 30d MBS performance vs 7Y UST into one of seven exhaustive scenarios.
+
+    A. Downtrend slowing       : both negative, 5d less negative than 30d
+    B. Short-term reversal     : 5d positive, 30d negative
+    C. Momentum accelerating   : both positive, 5d > 30d
+    D. Momentum fading         : both positive, 5d < 30d
+    E. Early rollover          : 5d negative, 30d positive
+    F. Extreme divergence      : opposite signs with gap magnitude > threshold
+    G. Downtrend accelerating  : both negative, 5d more negative than 30d
+    """
+    gap = last_5d - last_30d
+
+    # Extreme divergence: opposite signs and large gap
+    if (last_5d > 0 and last_30d < 0 and gap > extreme_threshold) or \
+       (last_5d < 0 and last_30d > 0 and abs(gap) > extreme_threshold):
+        return "F. Extreme divergence"
+
+    if last_5d > 0 and last_30d < 0:
+        return "B. Short-term reversal"
+
+    if last_5d < 0 and last_30d > 0:
+        return "E. Early rollover"
+
+    if last_5d > 0 and last_30d > 0:
+        return "C. Momentum accelerating" if last_5d > last_30d else "D. Momentum fading"
+
+    # Both negative
+    if last_5d > last_30d:
+        return "A. Downtrend slowing"
+    return "G. Downtrend accelerating"
+
+
+def build_citi_perf_summary(perf_df: pd.DataFrame) -> pd.DataFrame:
+    """Latest day, last 5-day, last 30-day, MTD, YTD performance vs 7Y UST in ticks (x32), plus 5d/30d signal.
+
+    The input should be the final daily series (see combine_citi_perf_history):
+    Sheet3 history with the ignored latest day already removed and the
+    current-day intraday mark already appended when available.
+    """
+    TICKS = 32.0
+    rows = []
+    for col in sorted(perf_df.columns):
+        agency, coupon = col.split()
+        coupon = float(coupon)
+        series = perf_df[col].dropna()
+        if series.empty:
+            continue
+
+        latest_date = series.index[-1]
+
+        # Most recent day
+        latest_day = float(series.iloc[-1]) * TICKS
+
+        # Last 5 trading days
+        last5 = float(series.tail(5).sum()) * TICKS
+
+        # Last 30 trading days
+        last30 = float(series.tail(30).sum()) * TICKS
+
+        # Month-to-date: from first trading day of current month
+        month_start = pd.Timestamp(latest_date.year, latest_date.month, 1)
+        mtd = float(series[series.index >= month_start].sum()) * TICKS
+
+        # Year-to-date: from first trading day of current year
+        year_start = pd.Timestamp(latest_date.year, 1, 1)
+        ytd = float(series[series.index >= year_start].sum()) * TICKS
+
+        # 5d vs 30d signal classification
+        signal = classify_citi_perf_signal(last5, last30)
+
+        rows.append({
+            "agency": agency,
+            "coupon": coupon,
+            "latest_day": latest_day,
+            "last_5d": last5,
+            "last_30d": last30,
+            "signal": signal,
+            "mtd": mtd,
+            "ytd": ytd,
         })
 
     summary = pd.DataFrame(rows)
@@ -465,7 +773,18 @@ def load_current_coupon_oas(start_date: str, end_date: str) -> pd.DataFrame:
         start_date=start_date,
         end_date=end_date,
     )
-    df.columns = df.columns.get_level_values(0)
+    # xbbg >= 1.x returns a narwhals DataFrame in long format
+    # (ticker / date / field / value); older versions return a pandas
+    # DataFrame with MultiIndex columns. Normalize both to a wide frame.
+    if not isinstance(df, pd.DataFrame):
+        df = df.to_pandas()
+    if {"ticker", "date", "field", "value"}.issubset(df.columns):
+        df = df.pivot_table(
+            index="date", columns="ticker", values="value", aggfunc="last"
+        )
+        df = df.sort_index()
+    elif isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
     df.index = pd.to_datetime(df.index)
     # Bloomberg returns OAS in percent; convert to bps for reporting
     df = df * 100.0
@@ -1351,6 +1670,22 @@ def get_block_columns(dat: pd.DataFrame, agency: str, field: str) -> List[str]:
     return [c for c in candidates if c in dat.columns]
 
 
+def available_drop_columns(dat: pd.DataFrame, agency: str) -> List[Tuple[float, str]]:
+    """Return (coupon, column) for every available '{agency} {coupon} Drop' column, sorted by coupon."""
+    prefix = f"{agency} "
+    available = []
+    for col in dat.columns:
+        col_str = str(col)
+        if not col_str.startswith(prefix) or not col_str.endswith(" Drop"):
+            continue
+        try:
+            coupon = float(col_str.split()[1])
+        except (IndexError, ValueError):
+            continue
+        available.append((coupon, col_str))
+    return sorted(available)
+
+
 def _price_to_handle_32nds(price: float) -> str:
     """Convert a decimal MBS price to handle-32nds notation (e.g. 98.5 -> '98-16').
 
@@ -1465,6 +1800,23 @@ def calc_cpn_swap_scores(
     return pd.DataFrame(rows)
 
 
+def calc_wide_cpn_swap_scores(
+    dat: pd.DataFrame,
+    agency: str,
+    lookback: int = DEFAULT_SWAP_LOOKBACK,
+    score_idx: int = -1,
+) -> pd.DataFrame:
+    """Calculate 100bp-apart coupon swap z-scores for one agency."""
+    cols = get_block_columns(dat, agency, "Price")
+    rows = []
+    date = dat.index[score_idx]
+    for i in range(len(cols) - 2):
+        name = f"{cols[i+2]}_{cols[i]}"
+        diff = (dat[cols[i+2]] - dat[cols[i]]) * 32
+        rows.append(_score_row(name, diff, lookback, score_idx, date))
+    return pd.DataFrame(rows)
+
+
 def calc_cpn_fly_scores(
     dat: pd.DataFrame,
     agency: str,
@@ -1509,15 +1861,17 @@ def calc_all_cpn_scores(
     score_indices: List[int] = None,
 ) -> pd.DataFrame:
     """
-    Combine FN swaps, G2 swaps, G2/FN swaps, FN flys and G2 flys
-    across multiple reference dates.
+    Combine FN swaps, FN/G2 100bp swaps, G2 swaps, G2/FN swaps, FN flys and
+    G2 flys across multiple reference dates.
     """
     score_indices = score_indices or DEFAULT_SCORE_INDICES
     frames = []
     for score_idx in score_indices:
         frames.extend([
             calc_cpn_swap_scores(dat, "FN", lookback, score_idx),
+            calc_wide_cpn_swap_scores(dat, "FN", lookback, score_idx),
             calc_cpn_swap_scores(dat, "G2", lookback, score_idx),
+            calc_wide_cpn_swap_scores(dat, "G2", lookback, score_idx),
             calc_g2fn_swap_scores(dat, lookback, score_idx),
             calc_cpn_fly_scores(dat, "FN", lookback, score_idx),
             calc_cpn_fly_scores(dat, "G2", lookback, score_idx),
@@ -1896,7 +2250,8 @@ def plot_g2_fn_recent_jpm_perf(
     colors = {
         coupon: palette(i % 10) for i, coupon in enumerate(G2_FN_PERF_COUPONS)
     }
-    groups = [G2_FN_PERF_COUPONS[:4], G2_FN_PERF_COUPONS[4:]]
+    half = (len(G2_FN_PERF_COUPONS) + 1) // 2
+    groups = [G2_FN_PERF_COUPONS[:half], G2_FN_PERF_COUPONS[half:]]
     for ax, coupons in zip(axes, groups):
         latest_lines = []
         for coupon in coupons:
@@ -1945,7 +2300,8 @@ def plot_g2_fn_ct10_rolling_corr(
     summary: pd.DataFrame,
 ) -> plt.Figure:
     """Plot rolling correlations of daily G2/FN JPM Perf with CT10 changes."""
-    fig, axes = plt.subplots(4, 2, figsize=(14, 11), sharex=True, sharey=True)
+    nrows = (len(G2_FN_PERF_COUPONS) + 1) // 2
+    fig, axes = plt.subplots(nrows, 2, figsize=(14, 2 * nrows + 3), sharex=True, sharey=True)
     axes_flat = axes.ravel()
     colors = {20: "#2563eb", 40: "#d97706", 60: "#059669"}
     for ax, coupon in zip(axes_flat, G2_FN_PERF_COUPONS):
@@ -2229,6 +2585,174 @@ def plot_coupon_fly_recent_price(
         weight="bold",
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
+    return fig
+
+
+def _adjacent_swap_specs() -> List[Tuple[str, str]]:
+    """(column, label) pairs for adjacent-coupon perf swap momentum."""
+    return [
+        (
+            f"{agency.lower()}_{high:g}_{low:g}_swap_perf_32nds",
+            f"{agency} {high:g}/{low:g}",
+        )
+        for agency in STRUCTURE_AGENCIES
+        for high, low in COUPON_SWAP_PAIRS
+    ]
+
+
+def _wide_swap_specs() -> List[Tuple[str, str]]:
+    """(column, label) pairs for 100-bps-wide perf swap momentum."""
+    return [
+        (
+            f"{agency.lower()}_{high:g}_{low:g}_wide_swap_perf_32nds",
+            f"{agency} {high:g}/{low:g}",
+        )
+        for agency in STRUCTURE_AGENCIES
+        for high, low in WIDE_COUPON_SWAP_PAIRS
+    ]
+
+
+def _fly_specs() -> List[Tuple[str, str]]:
+    """(column, label) pairs for three-price coupon fly momentum."""
+    return [
+        (
+            f"{agency.lower()}_{center:g}_fly_level_32nds",
+            f"{agency} {center:g} fly",
+        )
+        for agency in STRUCTURE_AGENCIES
+        for center in COUPON_FLY_CENTERS
+    ]
+
+
+def _g2_fn_specs() -> List[Tuple[str, str]]:
+    """(column, label) pairs for G2/FN relative perf momentum."""
+    return [
+        (f"g2_fn_{coupon:g}_perf_32nds", f"G2/FN {coupon:g}")
+        for coupon in G2_FN_PERF_COUPONS
+    ]
+
+
+def _classify_momentum_trend(short_score: float, medium_score: float) -> Tuple[str, str]:
+    """Trend direction and strength from short/medium momentum scores."""
+    if short_score > 0 and medium_score > 0:
+        direction = "Upward"
+    elif short_score < 0 and medium_score < 0:
+        direction = "Downward"
+    else:
+        direction = "Mixed"
+    average_strength = (abs(short_score) + abs(medium_score)) / 2.0
+    if average_strength >= 1.0:
+        strength = "Strong"
+    elif average_strength >= 0.5:
+        strength = "Moderate"
+    else:
+        strength = "Weak"
+    return direction, strength
+
+
+def build_structure_momentum(
+    data: pd.DataFrame,
+    specs: List[Tuple[str, str]],
+    cumulative: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Momentum monitor for perf-based coupon swaps or coupon flies.
+
+    ``specs`` is a list of (column, label) pairs into ``data``. For perf-based
+    swaps pass ``cumulative=True`` so daily Perf differences are summed into a
+    cumulative outperformance curve before trending; flies are already levels
+    and use ``cumulative=False``.
+
+    For each series the monitor reports trailing changes, rolling OLS slopes,
+    and volatility-adjusted momentum scores (slope x sqrt(window) / daily
+    realized vol) over STRUCTURE_MOM_WINDOWS, then classifies the trend:
+    both scores positive = Upward, both negative = Downward, otherwise Mixed.
+    """
+    history = pd.DataFrame(index=data.index)
+    rows = []
+    for key, label in specs:
+        if key not in data.columns:
+            continue
+        series = pd.to_numeric(data[key], errors="coerce").dropna()
+        if series.empty:
+            continue
+        if cumulative:
+            series = series.cumsum()
+        series = series.reindex(data.index)
+        history[f"{key}_level"] = series
+        row = {"structure": label, "latest": float(series.dropna().iloc[-1])}
+        for horizon in (5, 20, 60):
+            row[f"chg_{horizon}d"] = float(series.diff(horizon).dropna().iloc[-1])
+        for window in STRUCTURE_MOM_WINDOWS:
+            slope = _rolling_linear_slope(series, window)
+            vol = series.diff().rolling(window=window, min_periods=window).std(ddof=1)
+            score = slope * np.sqrt(window) / vol.replace(0, np.nan)
+            history[f"{key}_slope_{window}d"] = slope
+            history[f"{key}_mom_{window}d"] = score
+            row[f"slope_{window}d"] = float(slope.dropna().iloc[-1])
+            row[f"mom_{window}d"] = float(score.dropna().iloc[-1])
+        short_w, medium_w = STRUCTURE_MOM_WINDOWS[0], STRUCTURE_MOM_WINDOWS[1]
+        trend, strength = _classify_momentum_trend(
+            row[f"mom_{short_w}d"], row[f"mom_{medium_w}d"]
+        )
+        row["trend"] = trend
+        row["strength"] = strength
+        rows.append(row)
+    if not rows:
+        raise ValueError("No structure series available for momentum analysis.")
+    summary = pd.DataFrame(rows).set_index("structure")
+    return history, summary
+
+
+def plot_structure_momentum(
+    history: pd.DataFrame,
+    specs: List[Tuple[str, str]],
+    title: str,
+    meaning: Dict[str, str],
+    panels: Optional[List[Tuple[str, List[Tuple[str, str]]]]] = None,
+) -> plt.Figure:
+    """Volatility-adjusted momentum score histories for a structure category."""
+    short_w, medium_w = STRUCTURE_MOM_WINDOWS
+    if panels is None:
+        panels = [
+            (agency, [s for s in specs if s[1].startswith(f"{agency} ")])
+            for agency in STRUCTURE_AGENCIES
+        ]
+    fig, axes = plt.subplots(len(panels), 1, figsize=(13, 4.5 * len(panels)), sharex=True)
+    palette = plt.get_cmap("tab10")
+    for ax, (panel_title, panel_specs) in zip(axes, panels):
+        for i, (key, label) in enumerate(panel_specs):
+            medium = history.get(f"{key}_mom_{medium_w}d")
+            short = history.get(f"{key}_mom_{short_w}d")
+            if medium is None:
+                continue
+            color = palette(i % 10)
+            short_label = label.replace(f"{panel_title} ", "")
+            ax.plot(
+                medium.index, medium, lw=1.6, color=color,
+                label=f"{short_label} {medium_w}d",
+            )
+            ax.plot(
+                short.index, short, lw=0.7, color=color, alpha=0.55, linestyle="--",
+            )
+        ax.axhline(0, color="#111827", lw=0.8)
+        ax.axhline(1, color="#94a3b8", lw=0.8, ls="--")
+        ax.axhline(-1, color="#94a3b8", lw=0.8, ls="--")
+        ax.set_title(
+            f"{panel_title}  (solid = {medium_w}d score, dashed = {short_w}d)",
+            fontsize=11, weight="bold",
+        )
+        ax.set_ylabel("Momentum score")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="upper left", ncol=4, fontsize=8)
+    axes[-1].set_xlabel("Date")
+    fig.suptitle(title, fontsize=14, weight="bold")
+    fig.text(
+        0.5, 0.012,
+        f"Positive = {meaning['Upward']}; negative = {meaning['Downward']}. "
+        "Dashed lines mark the +/-1 score thresholds.",
+        ha="center", fontsize=8, color="#475569",
+    )
+    fig.tight_layout(rect=[0, 0.02, 1, 0.96])
     return fig
 
 
@@ -3066,25 +3590,29 @@ def _add_contents_page(
         "2. Yield basis score tables\n"
         "3. Performance over periods\n"
         "4. Rolling performance z-scores\n"
-        "5. G2/FN 3.0-6.5 JPM relative performance and CT10 correlation\n"
+        f"5. G2/FN {G2_FN_PERF_COUPONS[0]:g}-{G2_FN_PERF_COUPONS[-1]:g} JPM relative performance and CT10 correlation\n"
         "6. FN/G2 adjacent-coupon JPM performance swaps and CT10 correlation\n"
         "7. FN/G2 100-bps-wide JPM performance swaps and CT10 correlation\n"
         "8. FN/G2 three-price coupon flies and CT10 correlation\n"
-        "9. Current-coupon basis OLS summary\n"
-        "10. Current-coupon basis OLS parameters\n"
-        "11. Current-coupon full-sample actual / fitted / residual (each index)\n"
-        "12. Rolling current-coupon actual / fitted / residual (each index)\n"
-        "13. Conventional vs Ginnie current-coupon OAS spread\n"
-        "14. Current-coupon moving averages and realized volatility\n"
-        "15. Current-coupon basis momentum and trend monitor\n"
-        "16. FN basis vs UST 10y all-sample / rolling correlation and z-score\n"
-        "17. Per-coupon yield basis OLS summary\n"
-        "18. Per-coupon yield basis OLS parameters\n"
-        "19. Per-coupon yield basis fitted vs actual\n"
-        f"20. Appendix: historical charts for {num_cpn_fly_structures} cpn/fly structures\n"
-        "21. Appendix: full-history drop charts for each FN and G2 coupon\n"
-        "22. Appendix: monthly 60-observation drop Sharpe for each FN and G2 coupon\n"
-        "23. Appendix: 1y10y forward-vol drop Sharpe proxy for each coupon"
+        "9. G2/FN relative performance momentum and trend monitor\n"
+        "10. Adjacent-coupon swap momentum and trend monitor\n"
+        "11. 100-bps-wide coupon swap momentum and trend monitor\n"
+        "12. Three-price coupon fly momentum and trend monitor\n"
+        "13. Current-coupon basis OLS summary\n"
+        "14. Current-coupon basis OLS parameters\n"
+        "15. Current-coupon full-sample actual / fitted / residual (each index)\n"
+        "16. Rolling current-coupon actual / fitted / residual (each index)\n"
+        "17. Conventional vs Ginnie current-coupon OAS spread\n"
+        "18. Current-coupon moving averages and realized volatility\n"
+        "19. Current-coupon basis momentum and trend monitor\n"
+        "20. FN basis vs UST 10y all-sample / rolling correlation and z-score\n"
+        "21. Per-coupon yield basis OLS summary\n"
+        "22. Per-coupon yield basis OLS parameters\n"
+        "23. Per-coupon yield basis fitted vs actual\n"
+        f"24. Appendix: historical charts for {num_cpn_fly_structures} cpn/fly structures\n"
+        "25. Appendix: full-history drop charts for each FN and G2 coupon\n"
+        "26. Appendix: monthly 60-observation drop Sharpe for each FN and G2 coupon\n"
+        "27. Appendix: 1y10y forward-vol drop Sharpe proxy for each coupon"
     )
     ax.text(
         0.5, 0.30, contents,
@@ -3217,15 +3745,12 @@ def plot_coupon_drops(dat: pd.DataFrame) -> List[plt.Figure]:
     agency_colors = {"FN": "#2563eb", "G2": "#dc2626"}
 
     for agency in COUPON_BASIS_AGENCIES:
-        available = [
-            (coupon, _col(agency, coupon, "Drop"))
-            for coupon in COUPONS
-            if _col(agency, coupon, "Drop") in dat.columns
-        ]
+        available = available_drop_columns(dat, agency)
         if not available:
             continue
 
-        fig, axes = plt.subplots(4, 2, figsize=(13, 10), sharex=True, sharey=True)
+        nrows = (len(available) + 1) // 2
+        fig, axes = plt.subplots(nrows, 2, figsize=(13, max(10, 2.5 * nrows)), sharex=True, sharey=True)
         axes_flat = axes.ravel()
         for ax, (coupon, column) in zip(axes_flat, available):
             series = pd.to_numeric(dat[column], errors="coerce").dropna()
@@ -3283,14 +3808,14 @@ def plot_coupon_drop_sharpes(dat: pd.DataFrame) -> List[plt.Figure]:
     for agency in COUPON_BASIS_AGENCIES:
         available = [
             coupon
-            for coupon in COUPONS
-            if _col(agency, coupon, "Drop") in dat.columns
-            and _col(agency, coupon, "Perf") in dat.columns
+            for coupon, _ in available_drop_columns(dat, agency)
+            if _col(agency, coupon, "Perf") in dat.columns
         ]
         if not available:
             continue
 
-        fig, axes = plt.subplots(4, 2, figsize=(13, 10), sharex=True, sharey=True)
+        nrows = (len(available) + 1) // 2
+        fig, axes = plt.subplots(nrows, 2, figsize=(13, max(10, 2.5 * nrows)), sharex=True, sharey=True)
         axes_flat = axes.ravel()
         for ax, coupon in zip(axes_flat, available):
             drop = pd.to_numeric(
@@ -3355,15 +3880,12 @@ def plot_coupon_forward_vol_sharpes(dat: pd.DataFrame) -> List[plt.Figure]:
     agency_colors = {"FN": "#d97706", "G2": "#0891b2"}
 
     for agency in COUPON_BASIS_AGENCIES:
-        available = [
-            coupon
-            for coupon in COUPONS
-            if _col(agency, coupon, "Drop") in dat.columns
-        ]
+        available = [coupon for coupon, _ in available_drop_columns(dat, agency)]
         if not available:
             continue
 
-        fig, axes = plt.subplots(4, 2, figsize=(13, 10), sharex=True, sharey=True)
+        nrows = (len(available) + 1) // 2
+        fig, axes = plt.subplots(nrows, 2, figsize=(13, max(10, 2.5 * nrows)), sharex=True, sharey=True)
         axes_flat = axes.ravel()
         for ax, coupon in zip(axes_flat, available):
             drop = pd.to_numeric(
@@ -3562,6 +4084,16 @@ def _group_cpn_fly_rows(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
         if has_fn and has_g2:
             return "G2 / FN Swaps"
+
+        # 100bp-apart same-agency swaps (e.g. 'FN 4 Price_FN 3 Price')
+        legs = _parse_swap_fly_name(name)
+        if (
+            len(legs) == 2
+            and legs[0][0] == legs[1][0]
+            and abs(float(legs[0][1]) - float(legs[1][1])) == 1.0
+        ):
+            return f"{legs[0][0]} Coupon Swaps 100bp"
+
         if has_fn:
             return "FN Coupon Swaps"
         if has_g2:
@@ -3571,7 +4103,11 @@ def _group_cpn_fly_rows(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     df = df.copy()
     df["_category"] = df.index.map(_category)
 
-    order = ["FN Coupon Swaps", "G2 Coupon Swaps", "G2 / FN Swaps", "FN Flies", "G2 Flies"]
+    order = [
+        "FN Coupon Swaps", "FN Coupon Swaps 100bp",
+        "G2 Coupon Swaps", "G2 Coupon Swaps 100bp",
+        "G2 / FN Swaps", "FN Flies", "G2 Flies",
+    ]
     groups: Dict[str, pd.DataFrame] = {}
     for cat in order:
         sub = df[df["_category"] == cat].drop(columns="_category")
@@ -3881,6 +4417,53 @@ def _assemble_report_data(
         coupon_fly_display=coupon_fly_display,
     )
 
+    # Structure momentum monitors (G2/FN, adjacent swap, wide swap, fly)
+    g2_fn_mom_history, g2_fn_mom = build_structure_momentum(
+        g2_fn_perf_data, _g2_fn_specs(), cumulative=True
+    )
+    adj_swap_mom_history, adj_swap_mom = build_structure_momentum(
+        coupon_swap_data, _adjacent_swap_specs(), cumulative=True
+    )
+    wide_swap_mom_history, wide_swap_mom = build_structure_momentum(
+        wide_swap_data, _wide_swap_specs(), cumulative=True
+    )
+    fly_mom_history, fly_mom = build_structure_momentum(coupon_fly_data, _fly_specs())
+    payloads.update(
+        g2_fn_momentum=(g2_fn_mom_history, g2_fn_mom),
+        coupon_swap_momentum=(adj_swap_mom_history, adj_swap_mom),
+        wide_swap_momentum=(wide_swap_mom_history, wide_swap_mom),
+        coupon_fly_momentum=(fly_mom_history, fly_mom),
+    )
+
+    # Citi MBS performance vs 7Y UST (latest day, last 5d, last 30d, MTD, YTD in ticks)
+    payloads.update(citi_perf_summary=None, citi_perf_subtitle=None)
+    try:
+        citi_perf_df = load_citi_perf_data(CITI_FNAME)
+        citi_intraday_df = load_citi_perf_intraday(CITI_FNAME)
+        citi_perf_calc = combine_citi_perf_history(citi_perf_df, citi_intraday_df)
+        citi_perf_summary = build_citi_perf_summary(citi_perf_calc)
+        if not citi_perf_summary.empty:
+            intraday_note = ""
+            if (
+                not citi_intraday_df.empty
+                and citi_intraday_df.index[-1] > citi_perf_df.index[-1]
+            ):
+                intraday_note = (
+                    f"  |  latest day = {CITI_INTRADAY_SHEET} "
+                    f"{CITI_INTRADAY_HOUR}am intraday mark"
+                )
+            payloads["citi_perf_subtitle"] = (
+                f"Latest: {citi_perf_calc.index[-1].date()}  |  "
+                f"5d window: {citi_perf_calc.index[-5].date()} to "
+                f"{citi_perf_calc.index[-1].date()}  |  "
+                f"30d window: {citi_perf_calc.index[-30].date()} to "
+                f"{citi_perf_calc.index[-1].date()}  |  "
+                f"Performance vs 7Y UST in ticks (x32){intraday_note}"
+            )
+        payloads["citi_perf_summary"] = citi_perf_summary
+    except Exception as exc:
+        print(f"Citi performance section skipped: {exc}")
+
     # Current-coupon basis OLS (Conventional + Ginnie). Payloads are assigned
     # in the same order the pages used to be emitted, so a failure leaves
     # everything not yet computed as None, matching the old try/except cascade.
@@ -3945,6 +4528,21 @@ def _assemble_report_data(
         payloads["oas_summary"] = oas_summary
     except Exception as exc:
         print(f"TSY OAS z-score section skipped: {exc}")
+
+    # Citi FN / G2 OAS latest level vs 90-day history z-score
+    payloads.update(citi_oas_summary=None, citi_oas_subtitle=None)
+    try:
+        citi_oas_df = load_citi_oas_data(CITI_FNAME)
+        citi_oas_summary = build_citi_oas_summary(citi_oas_df, lookback=90)
+        if not citi_oas_summary.empty:
+            payloads["citi_oas_subtitle"] = (
+                f"Latest: {citi_oas_df.index[-1].date()}  |  "
+                f"90-day lookback  |  "
+                f"z-score = (current - 90d mean) / 90d std"
+            )
+        payloads["citi_oas_summary"] = citi_oas_summary
+    except Exception as exc:
+        print(f"Citi OAS section skipped: {exc}")
 
     # Per-coupon yield basis OLS (same predictors as CC basis)
     payloads.update(
@@ -4136,6 +4734,48 @@ def generate_report(
             compact=True,
         )
 
+        # Citi MBS performance vs 7Y UST (latest day, last 5d, last 30d, MTD, YTD in ticks)
+        try:
+            citi_perf_df = load_citi_perf_data(CITI_FNAME)
+            citi_intraday_df = load_citi_perf_intraday(CITI_FNAME)
+            citi_perf_calc = combine_citi_perf_history(citi_perf_df, citi_intraday_df)
+            citi_perf_summary = build_citi_perf_summary(citi_perf_calc)
+            if not citi_perf_summary.empty:
+                eff_date = citi_perf_calc.index[-1].date()
+                calc_series = citi_perf_calc
+                intraday_note = ""
+                if (
+                    not citi_intraday_df.empty
+                    and citi_intraday_df.index[-1] > citi_perf_df.index[-1]
+                ):
+                    intraday_note = (
+                        f"  |  latest day = {CITI_INTRADAY_SHEET} "
+                        f"{CITI_INTRADAY_HOUR}am intraday mark"
+                    )
+                citi_perf_subtitle = (
+                    f"Latest: {eff_date}  |  "
+                    f"5d window: {calc_series.index[-5].date()} to {calc_series.index[-1].date()}  |  "
+                    f"30d window: {calc_series.index[-30].date()} to {calc_series.index[-1].date()}  |  "
+                    f"Performance vs 7Y UST in ticks (x32){intraday_note}"
+                )
+                # Split by agency so each page is compact and readable
+                for agency_name, agency_df in citi_perf_summary.reset_index().groupby("agency"):
+                    agency_df = agency_df.drop(columns="agency").reset_index(drop=True)
+                    _add_table_page(
+                        pdf,
+                        agency_df,
+                        f"Citi {agency_name} MBS Performance vs 7Y UST",
+                        subtitle=citi_perf_subtitle,
+                        gradient_columns=["latest_day", "last_5d", "last_30d", "mtd", "ytd"],
+                        fontsize=8,
+                        row_height=0.08,
+                        pagesize=(12.0, 6.5),
+                        compact=True,
+                        include_index=False,
+                    )
+        except Exception as exc:
+            print(f"Citi performance section skipped: {exc}")
+
         # Rolling performance z-scores
         rolling_perf_z = build_rolling_perf_zscore_table(dat)
         rolling_perf_cols = ["latest_perf", f"roll_sum_{ROLL_SUM_WINDOW}d", f"z_score_{ROLL_SUM_Z_WINDOW}d"]
@@ -4160,7 +4800,7 @@ def generate_report(
         _add_table_page(
             pdf,
             g2_fn_perf_summary,
-            "G2 Minus FN JPM Performance: 3.0 to 6.5 Coupons",
+            f"G2 Minus FN JPM Performance: {G2_FN_PERF_COUPONS[0]:g} to {G2_FN_PERF_COUPONS[-1]:g} Coupons",
             subtitle=(
                 "Daily relative Perf = G2 JPM Perf - FN JPM Perf (32nds); "
                 "5d/20d/40d are cumulative sums  |  Correlation uses daily CT10 yield changes"
@@ -4183,6 +4823,51 @@ def generate_report(
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
         fig = plot_g2_fn_ct10_rolling_corr(g2_fn_perf_data, g2_fn_perf_summary)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+        # G2/FN relative performance momentum monitor
+        g2_fn_specs = _g2_fn_specs()
+        g2_fn_mom_history, g2_fn_mom = build_structure_momentum(
+            g2_fn_perf_data, g2_fn_specs, cumulative=True
+        )
+        _add_table_page(
+            pdf,
+            g2_fn_mom.drop(columns=["latest"]).reset_index(),
+            "G2/FN Relative Performance Momentum Monitor",
+            subtitle=(
+                "Cumulative G2-minus-FN Perf trend; score = rolling OLS slope x "
+                "sqrt(window) / daily realized vol  |  Upward = G2 outperforming FN; "
+                "Downward = FN outperforming G2"
+            ),
+            gradient_columns=["chg_20d", "chg_60d", "mom_20d", "mom_60d"],
+            diverging_columns=["chg_20d", "chg_60d", "mom_20d", "mom_60d"],
+            fontsize=7,
+            row_height=0.05,
+            pagesize=(16.0, 8.5),
+            compact=True,
+            include_index=False,
+        )
+        half = (len(g2_fn_specs) + 1) // 2
+        fig = plot_structure_momentum(
+            g2_fn_mom_history,
+            g2_fn_specs,
+            "G2/FN Relative Performance Momentum Monitor",
+            {
+                "Upward": "G2 outperforming FN",
+                "Downward": "FN outperforming G2",
+            },
+            panels=[
+                (
+                    f"G2/FN {G2_FN_PERF_COUPONS[0]:g} to {G2_FN_PERF_COUPONS[half - 1]:g}",
+                    g2_fn_specs[:half],
+                ),
+                (
+                    f"G2/FN {G2_FN_PERF_COUPONS[half]:g} to {G2_FN_PERF_COUPONS[-1]:g}",
+                    g2_fn_specs[half:],
+                ),
+            ],
+        )
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
@@ -4221,6 +4906,40 @@ def generate_report(
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
+        # Adjacent-coupon swap momentum monitor
+        adj_swap_specs = _adjacent_swap_specs()
+        adj_swap_mom_history, adj_swap_mom = build_structure_momentum(
+            coupon_swap_data, adj_swap_specs, cumulative=True
+        )
+        _add_table_page(
+            pdf,
+            adj_swap_mom.drop(columns=["latest"]).reset_index(),
+            "Adjacent-Coupon Swap Momentum Monitor",
+            subtitle=(
+                "Cumulative swap Perf trend; score = rolling OLS slope x sqrt(window) / "
+                "daily realized vol  |  Upward = higher coupon outperforming; "
+                "Downward = lower coupon outperforming"
+            ),
+            gradient_columns=["chg_20d", "chg_60d", "mom_20d", "mom_60d"],
+            diverging_columns=["chg_20d", "chg_60d", "mom_20d", "mom_60d"],
+            fontsize=7,
+            row_height=0.05,
+            pagesize=(16.0, 8.5),
+            compact=True,
+            include_index=False,
+        )
+        fig = plot_structure_momentum(
+            adj_swap_mom_history,
+            adj_swap_specs,
+            "Adjacent-Coupon Swap Momentum Monitor",
+            {
+                "Upward": "higher coupon outperforming",
+                "Downward": "lower coupon outperforming",
+            },
+        )
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
         # 100-bps-wide coupon swaps using JPM daily performance
         wide_swap_data = build_wide_coupon_swap_jpm_perf_timeseries(dat)
         wide_swap_summary = build_wide_coupon_swap_jpm_perf_summary(wide_swap_data)
@@ -4257,6 +4976,40 @@ def generate_report(
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
+        # 100-bps-wide coupon swap momentum monitor
+        wide_swap_specs = _wide_swap_specs()
+        wide_swap_mom_history, wide_swap_mom = build_structure_momentum(
+            wide_swap_data, wide_swap_specs, cumulative=True
+        )
+        _add_table_page(
+            pdf,
+            wide_swap_mom.drop(columns=["latest"]).reset_index(),
+            "100-bps-Wide Coupon Swap Momentum Monitor",
+            subtitle=(
+                "Cumulative 100-bps-wide swap Perf trend; score = rolling OLS slope x "
+                "sqrt(window) / daily realized vol  |  Upward = higher coupon "
+                "outperforming; Downward = lower coupon outperforming"
+            ),
+            gradient_columns=["chg_20d", "chg_60d", "mom_20d", "mom_60d"],
+            diverging_columns=["chg_20d", "chg_60d", "mom_20d", "mom_60d"],
+            fontsize=7,
+            row_height=0.05,
+            pagesize=(16.0, 8.5),
+            compact=True,
+            include_index=False,
+        )
+        fig = plot_structure_momentum(
+            wide_swap_mom_history,
+            wide_swap_specs,
+            "100-bps-Wide Coupon Swap Momentum Monitor",
+            {
+                "Upward": "higher coupon outperforming",
+                "Downward": "lower coupon outperforming",
+            },
+        )
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
         # Three-price coupon flies using 2*center - lower - upper
         coupon_fly_data = build_coupon_fly_price_timeseries(dat)
         coupon_fly_summary = build_coupon_fly_price_summary(coupon_fly_data)
@@ -4291,6 +5044,40 @@ def generate_report(
         ):
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
+
+        # Three-price coupon fly momentum monitor
+        fly_specs = _fly_specs()
+        fly_mom_history, fly_mom = build_structure_momentum(
+            coupon_fly_data, fly_specs
+        )
+        _add_table_page(
+            pdf,
+            fly_mom.rename(columns={"latest": "level_latest"}).reset_index(),
+            "Three-Price Coupon Fly Momentum Monitor",
+            subtitle=(
+                "Fly level = 2 x center - lower - upper (32nds); score = rolling OLS "
+                "slope x sqrt(window) / daily realized vol  |  Upward = fly level "
+                "rising; Downward = fly level falling"
+            ),
+            gradient_columns=["level_latest", "chg_20d", "chg_60d", "mom_20d", "mom_60d"],
+            diverging_columns=["chg_20d", "chg_60d", "mom_20d", "mom_60d"],
+            fontsize=7,
+            row_height=0.05,
+            pagesize=(16.0, 8.5),
+            compact=True,
+            include_index=False,
+        )
+        fig = plot_structure_momentum(
+            fly_mom_history,
+            fly_specs,
+            "Three-Price Coupon Fly Momentum Monitor",
+            {
+                "Upward": "fly level rising",
+                "Downward": "fly level falling",
+            },
+        )
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
 
         # Current-coupon basis OLS (Conventional + Ginnie)
         try:
@@ -4499,6 +5286,31 @@ def generate_report(
             except Exception as exc:
                 print(f"TSY OAS z-score section skipped: {exc}")
 
+        # Citi FN / G2 OAS latest level vs 90-day history z-score
+        try:
+            citi_oas_df = load_citi_oas_data(CITI_FNAME)
+            citi_oas_summary = build_citi_oas_summary(citi_oas_df, lookback=90)
+            if not citi_oas_summary.empty:
+                citi_subtitle = (
+                    f"Latest: {citi_oas_df.index[-1].date()}  |  "
+                    f"90-day lookback  |  "
+                    f"z-score = (current - 90d mean) / 90d std"
+                )
+                _add_table_page(
+                    pdf,
+                    citi_oas_summary.reset_index(),
+                    "Citi FN / G2 OAS vs 90-Day History Z-Score",
+                    subtitle=citi_subtitle,
+                    gradient_columns=["z_score_90d"],
+                    fontsize=8,
+                    row_height=0.05,
+                    pagesize=(8.5, 5.5),
+                    compact=True,
+                    include_index=False,
+                )
+        except Exception as exc:
+            print(f"Citi OAS section skipped: {exc}")
+
         # Per-coupon yield basis OLS (same predictors as CC basis)
         try:
             cb_summary = payloads["cb_summary"]
@@ -4647,6 +5459,10 @@ def main(report_format=DEFAULT_REPORT_FORMAT) -> None:
     g2_fn_perf_summary.to_csv(g2_fn_perf_summary_path, index=False)
     print(f"Saved G2/FN JPM performance time series: {g2_fn_perf_data_path}")
     print(f"Saved G2/FN JPM performance summary: {g2_fn_perf_summary_path}")
+    g2_fn_mom_history, g2_fn_mom = build_structure_momentum(
+        g2_fn_perf_data, _g2_fn_specs(), cumulative=True
+    )
+    g2_fn_mom.to_csv(OUTPUT_DIR / "g2_fn_momentum_summary.csv")
     coupon_swap_data = build_coupon_swap_jpm_perf_timeseries(dat)
     coupon_swap_summary = build_coupon_swap_jpm_perf_summary(coupon_swap_data)
     coupon_swap_data_path = OUTPUT_DIR / "coupon_swap_jpm_perf_timeseries.csv"
@@ -4671,6 +5487,16 @@ def main(report_format=DEFAULT_REPORT_FORMAT) -> None:
     coupon_fly_summary.to_csv(coupon_fly_summary_path, index=False)
     print(f"Saved coupon-fly price time series: {coupon_fly_data_path}")
     print(f"Saved coupon-fly price summary: {coupon_fly_summary_path}")
+    adj_swap_mom_history, adj_swap_mom = build_structure_momentum(
+        coupon_swap_data, _adjacent_swap_specs(), cumulative=True
+    )
+    adj_swap_mom.to_csv(OUTPUT_DIR / "coupon_swap_momentum_summary.csv")
+    wide_swap_mom_history, wide_swap_mom = build_structure_momentum(
+        wide_swap_data, _wide_swap_specs(), cumulative=True
+    )
+    wide_swap_mom.to_csv(OUTPUT_DIR / "wide_coupon_swap_momentum_summary.csv")
+    fly_mom_history, fly_mom = build_structure_momentum(coupon_fly_data, _fly_specs())
+    fly_mom.to_csv(OUTPUT_DIR / "coupon_fly_momentum_summary.csv")
 
     # Build current-coupon basis dataset once and reuse it
     try:
@@ -4731,12 +5557,20 @@ def main(report_format=DEFAULT_REPORT_FORMAT) -> None:
     print(f"Observations: {len(dat)}")
     print("\nG2 Minus FN JPM Performance and CT10 Correlation")
     print(g2_fn_perf_summary.to_string(index=False))
+    print("\nG2/FN Relative Performance Momentum Monitor")
+    print(g2_fn_mom.to_string())
     print("\nAdjacent-Coupon JPM Performance Swaps and CT10 Correlation")
     print(coupon_swap_summary.drop(columns=["series_key"]).to_string(index=False))
     print("\n100-bps-Wide Coupon JPM Performance Swaps and CT10 Correlation")
     print(wide_swap_summary.drop(columns=["series_key"]).to_string(index=False))
     print("\nThree-Price Coupon Flies and CT10 Correlation")
     print(coupon_fly_summary.drop(columns=["series_key"]).to_string(index=False))
+    print("\nAdjacent-Coupon Swap Momentum Monitor")
+    print(adj_swap_mom.to_string())
+    print("\n100-bps-Wide Coupon Swap Momentum Monitor")
+    print(wide_swap_mom.to_string())
+    print("\nThree-Price Coupon Fly Momentum Monitor")
+    print(fly_mom.to_string())
     if cc_summary is not None:
         print("\nCurrent-Coupon Basis OLS Summary")
         print(cc_summary.to_string())
@@ -4784,7 +5618,7 @@ if __name__ == "__main__":
         nargs="+",
         choices=("html", "pdf", "interactive"),
         default=[DEFAULT_REPORT_FORMAT],
-        help="Report output format(s): html, pdf and/or interactive (default: html).",
+        help="Report output format(s): html, pdf and/or interactive (default: interactive).",
     )
     args = parser.parse_args()
     main(report_format=args.format)

@@ -235,8 +235,9 @@ def _df_to_html_table(
 # ---------------------------------------------------------------------------
 def _fig_g2_fn_recent_jpm_perf(perf_data: pd.DataFrame, summary: pd.DataFrame) -> go.Figure:
     coupons = rv.G2_FN_PERF_COUPONS
+    half = (len(coupons) + 1) // 2
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.07)
-    for r, group in enumerate([coupons[:4], coupons[4:]], start=1):
+    for r, group in enumerate([coupons[:half], coupons[half:]], start=1):
         latest_lines = []
         for coupon in group:
             color = TAB10[coupons.index(coupon) % 10]
@@ -363,8 +364,9 @@ def _corr_panel_annotation(fig: go.Figure, values: Dict[str, float], idx: int) -
 
 def _fig_g2_fn_ct10_rolling_corr(perf_data: pd.DataFrame, summary: pd.DataFrame) -> go.Figure:
     coupons = rv.G2_FN_PERF_COUPONS
+    nrows = (len(coupons) + 1) // 2
     fig = make_subplots(
-        rows=4, cols=2, shared_xaxes=True, shared_yaxes=True,
+        rows=nrows, cols=2, shared_xaxes=True, shared_yaxes=True,
         subplot_titles=[f"G2/FN {c:g}" for c in coupons],
         vertical_spacing=0.055, horizontal_spacing=0.07,
     )
@@ -388,7 +390,7 @@ def _fig_g2_fn_ct10_rolling_corr(perf_data: pd.DataFrame, summary: pd.DataFrame)
     _apply_layout(
         fig,
         "G2 Minus FN Daily JPM Performance vs Daily CT10 Yield Change",
-        height=1000,
+        height=int(220 * nrows + 120),
         subtitle="Rolling correlations use paired daily observations; CT10 change is measured in bps.",
     )
     return fig
@@ -430,6 +432,69 @@ def _fig_structure_ct10_rolling_corr(
         f"{agency} {title} vs Daily CT10 Yield Change",
         height=int(260 * nrows + 200),
         subtitle="Correlation uses daily structure changes and daily CT10 yield changes; dashed line = full sample.",
+    )
+    return fig
+
+
+def _fig_structure_momentum(
+    history: pd.DataFrame,
+    specs: List[Tuple[str, str]],
+    title: str,
+    meaning: Dict[str, str],
+    panels: Optional[List[Tuple[str, List[Tuple[str, str]]]]] = None,
+) -> go.Figure:
+    """Plotly port of mbs_rv_report.plot_structure_momentum."""
+    short_w, medium_w = rv.STRUCTURE_MOM_WINDOWS
+    if panels is None:
+        panels = [
+            (agency, [s for s in specs if s[1].startswith(f"{agency} ")])
+            for agency in rv.STRUCTURE_AGENCIES
+        ]
+    fig = make_subplots(
+        rows=len(panels), cols=1, shared_xaxes=True, vertical_spacing=0.07,
+        subplot_titles=[
+            f"{panel_title}  (solid = {medium_w}d score, dashed = {short_w}d)"
+            for panel_title, _ in panels
+        ],
+    )
+    for r, (panel_title, panel_specs) in enumerate(panels, start=1):
+        for i, (key, label) in enumerate(panel_specs):
+            medium = history.get(f"{key}_mom_{medium_w}d")
+            short = history.get(f"{key}_mom_{short_w}d")
+            if medium is None:
+                continue
+            color = TAB10[i % 10]
+            short_label = label.replace(f"{panel_title} ", "")
+            fig.add_trace(
+                go.Scatter(
+                    x=_xs(medium.index), y=_ys(medium), mode="lines",
+                    name=f"{short_label} {medium_w}d",
+                    line=dict(color=color, width=1.6),
+                ),
+                row=r, col=1,
+            )
+            if short is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=_xs(short.index), y=_ys(short), mode="lines",
+                        name=f"{short_label} {short_w}d",
+                        line=dict(color=color, width=0.7, dash="dash"),
+                        opacity=0.55, showlegend=False,
+                    ),
+                    row=r, col=1,
+                )
+        fig.add_hline(0, line=dict(color="#111827", width=0.8), row=r, col=1)
+        for level in (1, -1):
+            fig.add_hline(level, line=dict(color="#94a3b8", width=0.8, dash="dash"), row=r, col=1)
+        fig.update_yaxes(title_text="Momentum score", row=r, col=1)
+    _apply_layout(
+        fig,
+        title,
+        height=int(430 * len(panels) + 170),
+        subtitle=(
+            f"Positive = {meaning['Upward']}; negative = {meaning['Downward']}. "
+            "Dashed lines mark the +/-1 score thresholds."
+        ),
     )
     return fig
 
@@ -952,9 +1017,8 @@ def _fig_coupon_drop_grid(dat: pd.DataFrame, agency: str, kind: str) -> Optional
     monthly_fwd_vol = annualized_vol / np.sqrt(rv.COUPON_FORWARD_VOL_MONTHS) if kind == "fwdvol" else None
 
     available = [
-        coupon for coupon in rv.COUPONS
-        if rv._col(agency, coupon, "Drop") in dat.columns
-        and (kind != "sharpe" or rv._col(agency, coupon, "Perf") in dat.columns)
+        coupon for coupon, _ in rv.available_drop_columns(dat, agency)
+        if kind != "sharpe" or rv._col(agency, coupon, "Perf") in dat.columns
     ]
     if not available:
         return None
@@ -989,9 +1053,10 @@ def _fig_coupon_drop_grid(dat: pd.DataFrame, agency: str, kind: str) -> Optional
         panel_series.append(series)
         panel_titles.append(title)
 
+    nrows = (len(panel_titles) + 1) // 2
     fig = make_subplots(
-        rows=4, cols=2, shared_xaxes=True, shared_yaxes=True,
-        subplot_titles=panel_titles + [""] * (8 - len(panel_titles)),
+        rows=nrows, cols=2, shared_xaxes=True, shared_yaxes=True,
+        subplot_titles=panel_titles,
         vertical_spacing=0.055, horizontal_spacing=0.07,
     )
     for i, series in enumerate(panel_series):
@@ -1008,7 +1073,7 @@ def _fig_coupon_drop_grid(dat: pd.DataFrame, agency: str, kind: str) -> Optional
         )
         fig.add_hline(0, line=dict(color="#64748b", width=0.7, dash="dash"), row=r, col=c)
         fig.update_yaxes(title_text=y_label, row=r, col=c)
-    _apply_layout(fig, suptitle, height=1000)
+    _apply_layout(fig, suptitle, height=max(1000, 240 * nrows))
     return fig
 
 
@@ -1090,14 +1155,16 @@ def _overview_body(dat: pd.DataFrame, payloads: Dict) -> str:
         price_html = "<p>No latest price data available.</p>"
     num_structures = len(payloads["cpn_fly_summary"])
     contents_items = [
-        "Coupon swap / fly / G2-FN score tables",
+        "Coupon swap / 100bp swap / fly / G2-FN score tables",
         "Yield basis score tables",
         "Performance over periods",
+        "Citi FN/G2 MBS performance vs 7Y UST",
         "Rolling performance z-scores",
-        "G2/FN 3.0-6.5 JPM relative performance and CT10 correlation",
+        f"G2/FN {rv.G2_FN_PERF_COUPONS[0]:g}-{rv.G2_FN_PERF_COUPONS[-1]:g} JPM relative performance and CT10 correlation",
         "FN/G2 adjacent-coupon JPM performance swaps and CT10 correlation",
         "FN/G2 100-bps-wide JPM performance swaps and CT10 correlation",
         "FN/G2 three-price coupon flies and CT10 correlation",
+        "Momentum monitors: G2/FN relative performance, coupon swaps and flies",
         "Current-coupon basis OLS summary and parameters",
         "Current-coupon full-sample and rolling actual / fitted / residual",
         "Conventional vs Ginnie current-coupon OAS spread",
@@ -1105,6 +1172,7 @@ def _overview_body(dat: pd.DataFrame, payloads: Dict) -> str:
         "FN basis vs UST 10y rolling correlation and z-score",
         "Per-coupon yield basis OLS summary, parameters and fitted charts",
         "Cross-structure CT10 correlation, volatility and daily distributions",
+        "FN/G2 TSY OAS and Citi OAS z-score monitors",
         f"Appendix: historical charts for {num_structures} cpn/fly structures (dropdowns)",
         "Appendix: full-history drop, drop-Sharpe and forward-vol Sharpe charts (dropdowns)",
     ]
@@ -1151,6 +1219,48 @@ def _try_view(b: _ReportBuilder, title: str, section: str, kind: str, *args, **k
         print(f"Interactive view '{title}' skipped: {exc}")
 
 
+_MOM_GRADIENT_COLS = ["chg_20d", "chg_60d", "mom_20d", "mom_60d"]
+
+
+def _add_momentum_pages(
+    b: _ReportBuilder,
+    payloads: Dict,
+    payload_key: str,
+    title: str,
+    section: str,
+    specs: List[Tuple[str, str]],
+    meaning: Dict[str, str],
+    subtitle: str,
+    panels: Optional[List[Tuple[str, List[Tuple[str, str]]]]] = None,
+    rename_latest: bool = False,
+) -> None:
+    """Table + chart pages for one structure momentum monitor payload."""
+    momentum = payloads.get(payload_key)
+    if momentum is None:
+        return
+    history, summary = momentum
+    gradient = list(_MOM_GRADIENT_COLS)
+    if rename_latest:
+        table = summary.rename(columns={"latest": "level_latest"})
+        gradient = ["level_latest"] + gradient
+    else:
+        table = summary.drop(columns=["latest"])
+    b.add_table(
+        title, section,
+        _df_to_html_table(
+            table.reset_index(),
+            gradient_columns=gradient,
+            diverging_columns=_MOM_GRADIENT_COLS,
+            include_index=False,
+        ),
+        subtitle=subtitle,
+    )
+    _try_view(
+        b, f"{title} (Charts)", section, "fig",
+        lambda: _fig_structure_momentum(history, specs, title, meaning, panels=panels),
+    )
+
+
 def _build_pages(payloads: Dict) -> _ReportBuilder:
     b = _ReportBuilder()
     dat = payloads["dat"]
@@ -1186,6 +1296,19 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
         _df_to_html_table(payloads["perf_summary"], gradient_columns=payloads["perf_cols"]),
         subtitle=f"Cumulative JPM DataQuery performance (32nds) over trailing windows  |  Latest: {latest}",
     )
+    citi_perf_summary = payloads.get("citi_perf_summary")
+    if citi_perf_summary is not None and not citi_perf_summary.empty:
+        for agency_name, agency_df in citi_perf_summary.reset_index().groupby("agency"):
+            agency_df = agency_df.drop(columns="agency").reset_index(drop=True)
+            b.add_table(
+                f"Citi {agency_name} MBS Performance vs 7Y UST", "Performance",
+                _df_to_html_table(
+                    agency_df,
+                    gradient_columns=["latest_day", "last_5d", "last_30d", "mtd", "ytd"],
+                    include_index=False,
+                ),
+                subtitle=payloads.get("citi_perf_subtitle"),
+            )
     b.add_table(
         f"Rolling Performance Z-Scores ({rv.ROLL_SUM_WINDOW}d sum / {rv.ROLL_SUM_Z_WINDOW}d z-score)",
         "Performance",
@@ -1196,7 +1319,7 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
     # G2/FN relative value
     perf_grad = _perf_gradient_cols()
     b.add_table(
-        "G2 Minus FN JPM Performance: 3.0 to 6.5 Coupons", "G2 & FN relative value",
+        f"G2 Minus FN JPM Performance: {rv.G2_FN_PERF_COUPONS[0]:g} to {rv.G2_FN_PERF_COUPONS[-1]:g} Coupons", "G2 & FN relative value",
         _df_to_html_table(
             payloads["g2_fn_perf_summary"],
             gradient_columns=perf_grad, diverging_columns=perf_grad, include_index=False,
@@ -1213,6 +1336,27 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
         b, "G2 Minus FN Daily JPM Performance vs Daily CT10 Yield Change",
         "G2 & FN relative value", "fig",
         lambda: _fig_g2_fn_ct10_rolling_corr(payloads["g2_fn_perf_data"], payloads["g2_fn_perf_summary"]),
+    )
+    g2_fn_specs = rv._g2_fn_specs()
+    g2_fn_half = (len(g2_fn_specs) + 1) // 2
+    _add_momentum_pages(
+        b, payloads, "g2_fn_momentum",
+        "G2/FN Relative Performance Momentum Monitor", "G2 & FN relative value",
+        g2_fn_specs,
+        {"Upward": "G2 outperforming FN", "Downward": "FN outperforming G2"},
+        "Cumulative G2-minus-FN Perf trend; score = rolling OLS slope x "
+        "sqrt(window) / daily realized vol  |  Upward = G2 outperforming FN; "
+        "Downward = FN outperforming G2",
+        panels=[
+            (
+                f"G2/FN {rv.G2_FN_PERF_COUPONS[0]:g} to {rv.G2_FN_PERF_COUPONS[g2_fn_half - 1]:g}",
+                g2_fn_specs[:g2_fn_half],
+            ),
+            (
+                f"G2/FN {rv.G2_FN_PERF_COUPONS[g2_fn_half]:g} to {rv.G2_FN_PERF_COUPONS[-1]:g}",
+                g2_fn_specs[g2_fn_half:],
+            ),
+        ],
     )
 
     # Adjacent-coupon swaps
@@ -1244,6 +1388,15 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
                 "Adjacent-Coupon Swap JPM Perf", agency,
             ),
         )
+    _add_momentum_pages(
+        b, payloads, "coupon_swap_momentum",
+        "Adjacent-Coupon Swap Momentum Monitor", "Coupon structures",
+        rv._adjacent_swap_specs(),
+        {"Upward": "higher coupon outperforming", "Downward": "lower coupon outperforming"},
+        "Cumulative swap Perf trend; score = rolling OLS slope x sqrt(window) / "
+        "daily realized vol  |  Upward = higher coupon outperforming; "
+        "Downward = lower coupon outperforming",
+    )
 
     # 100-bps-wide swaps
     b.add_table(
@@ -1275,6 +1428,15 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
                 "100-bps-Wide Coupon Swap JPM Perf", agency,
             ),
         )
+    _add_momentum_pages(
+        b, payloads, "wide_swap_momentum",
+        "100-bps-Wide Coupon Swap Momentum Monitor", "Coupon structures",
+        rv._wide_swap_specs(),
+        {"Upward": "higher coupon outperforming", "Downward": "lower coupon outperforming"},
+        "Cumulative 100-bps-wide swap Perf trend; score = rolling OLS slope x "
+        "sqrt(window) / daily realized vol  |  Upward = higher coupon "
+        "outperforming; Downward = lower coupon outperforming",
+    )
 
     # Three-price flies
     fly_grad = _fly_gradient_cols()
@@ -1301,6 +1463,16 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
                 "Three-Price Coupon Fly Changes", agency,
             ),
         )
+    _add_momentum_pages(
+        b, payloads, "coupon_fly_momentum",
+        "Three-Price Coupon Fly Momentum Monitor", "Coupon structures",
+        rv._fly_specs(),
+        {"Upward": "fly level rising", "Downward": "fly level falling"},
+        "Fly level = 2 x center - lower - upper (32nds); score = rolling OLS "
+        "slope x sqrt(window) / daily realized vol  |  Upward = fly level "
+        "rising; Downward = fly level falling",
+        rename_latest=True,
+    )
 
     _build_cc_pages(b, payloads)
     _build_oas_pages(b, payloads)
@@ -1449,13 +1621,29 @@ def _build_cc_pages(b: _ReportBuilder, payloads: Dict) -> None:
 
 def _build_oas_pages(b: _ReportBuilder, payloads: Dict) -> None:
     oas_summary = payloads.get("oas_summary")
-    if oas_summary is None or oas_summary.empty:
-        return
-    b.add_table(
-        "FN / G2 TSY OAS vs 1-Year History Z-Score", "Performance",
-        _df_to_html_table(oas_summary.reset_index(), gradient_columns=["z_score"], include_index=False),
-        subtitle=payloads["oas_subtitle"],
-    )
+    if oas_summary is not None and not oas_summary.empty:
+        b.add_table(
+            "FN / G2 TSY OAS vs 1-Year History Z-Score", "Performance",
+            _df_to_html_table(
+                oas_summary.reset_index(),
+                gradient_columns=["z_score"],
+                diverging_columns=["chg_5d", "chg_10d", "chg_20d"],
+                include_index=False,
+            ),
+            subtitle=payloads["oas_subtitle"],
+        )
+    citi_oas_summary = payloads.get("citi_oas_summary")
+    if citi_oas_summary is not None and not citi_oas_summary.empty:
+        b.add_table(
+            "Citi FN / G2 OAS vs 90-Day History Z-Score", "Performance",
+            _df_to_html_table(
+                citi_oas_summary.reset_index(),
+                gradient_columns=["z_score_90d"],
+                diverging_columns=["chg_5d", "chg_10d", "chg_20d"],
+                include_index=False,
+            ),
+            subtitle=payloads.get("citi_oas_subtitle"),
+        )
 
 
 def _build_cb_pages(b: _ReportBuilder, payloads: Dict) -> None:
@@ -1612,6 +1800,26 @@ const pages=[...document.querySelectorAll('.report-page')];
 const links=[...document.querySelectorAll('.nav-group a')];
 filter.addEventListener('input',()=>{const q=filter.value.trim().toLowerCase();let n=0;pages.forEach(p=>{const show=!q||p.dataset.search.includes(q);p.classList.toggle('hidden',!show);if(show)n++;});links.forEach(a=>a.classList.toggle('hidden',q&&!a.dataset.search.includes(q)));document.getElementById('visibleCount').textContent=`${n} views`;});
 document.getElementById('topButton').addEventListener('click',()=>window.scrollTo({top:0,behavior:'smooth'}));
+document.querySelectorAll('.data-table').forEach(table=>{
+const tbody=table.tBodies[0];if(!tbody)return;
+table.querySelectorAll('th').forEach((th,col)=>{
+th.title='Click to sort';
+th.addEventListener('click',()=>{
+const asc=th.dataset.sortDir!=='asc';
+table.querySelectorAll('th').forEach(h=>{delete h.dataset.sortDir;});
+th.dataset.sortDir=asc?'asc':'desc';
+const text=tr=>tr.children[col]?tr.children[col].textContent.trim():'';
+const num=t=>{const n=parseFloat(t.replace(/,/g,''));return t!==''&&!isNaN(n)?n:null;};
+const rows=[...tbody.rows];
+rows.sort((a,b)=>{
+const ta=text(a),tb=text(b),na=num(ta),nb=num(tb);
+let cmp;
+if(na!==null&&nb!==null)cmp=na-nb;
+else cmp=ta.localeCompare(tb,undefined,{numeric:true});
+return asc?cmp:-cmp;
+});
+rows.forEach(r=>tbody.appendChild(r));
+});});});
 """
 
 
