@@ -27,6 +27,13 @@ Thumbs.db
 /fund_flows_output/
 /fund_sensitivity_output/
 /fund_flow_forward_output/
+/euribor_basis_output/
+/inst_fut_position_output/
+/month_end_equity_bond_output/
+/swap_spread_output/
+/swaption_skew_output/
+/ust_on_off_the_run_output/
+/_tmp_*
 /outputs/
 /tmp/
 /cta/walkforward_output/

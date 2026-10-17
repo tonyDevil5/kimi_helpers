@@ -1046,6 +1046,11 @@ def _assemble_report_data(dat_final: pd.DataFrame) -> Dict:
     # Use the parameter names as the index so the table has a single feature column
     params_table = build_regression_params_table(model)
     params_table = params_table.set_index("parameter").rename_axis("feature")
+    latest_row = dat_final.iloc[-1]
+    params_table.insert(1, "latest_value", [
+        round(float(latest_row[f]), 4) if f in dat_final.columns else np.nan
+        for f in params_table.index
+    ])
 
     stats_table = build_regression_stats_table(model)
 
