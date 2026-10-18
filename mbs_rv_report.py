@@ -53,8 +53,11 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-FNAME = r"D:\python\notebook\data\mbs\mbs_rv.xlsx"
-CITI_FNAME = r"D:\python\notebook\data\mbs\mbs_rv_citi.xlsx"
+_MBS_DATA_DIR = Path(r"D:\python\notebook\data\mbs")
+if not (_MBS_DATA_DIR / "mbs_rv.xlsx").exists():
+    _MBS_DATA_DIR = Path.home() / "Nutstore" / "1" / "python" / "notebook" / "data" / "mbs"
+FNAME = str(_MBS_DATA_DIR / "mbs_rv.xlsx")
+CITI_FNAME = str(_MBS_DATA_DIR / "mbs_rv_citi.xlsx")
 
 # Citi performance vs 7Y UST: threshold (in ticks) for "extreme divergence" signal
 CITI_PERF_EXTREME_GAP_TICKS = 25.0
@@ -62,7 +65,7 @@ CITI_PERF_EXTREME_GAP_TICKS = 25.0
 CITI_PERF_IGNORE_LATEST_DAY = True
 # Intraday sheet holds hourly snapshots of the same perf tickers; the 5am mark
 # of the current date is appended as the latest day of the perf table.
-CITI_INTRADAY_SHEET = "Sheet6"
+CITI_INTRADAY_SHEET = None  # Auto-detect by performance headers and intraday timestamps.
 CITI_INTRADAY_HOUR = 5
 OUTPUT_DIR = Path(__file__).parent / "mbs_rv_output"
 DEFAULT_REPORT_FORMAT = "interactive"
@@ -429,6 +432,51 @@ def build_tsy_oas_summary(oas_df: pd.DataFrame, lookback: int = TSY_OAS_LOOKBACK
 # ---------------------------------------------------------------------------
 # Citi MBS OAS summary
 # ---------------------------------------------------------------------------
+def _resolve_citi_sheet(book, role: str, preferred: Optional[str] = None):
+    """Identify Citi tabs by series headers and timestamp frequency, not names/order."""
+    matches = []
+    for name in book.sheet_names:
+        preview = pd.read_excel(book, sheet_name=name, header=None, nrows=72)
+        for header in range(min(8, len(preview))):
+            values = [str(v).upper() for v in preview.iloc[header, 1:] if pd.notna(v)]
+            oas = any("MBS_FIXED_RATE" in v and "T_OAS" in v for v in values)
+            perf = any("MBS_PERF" in v and "VS_7S_UST" in v for v in values)
+            if not (oas or perf):
+                continue
+            if oas:
+                kind = "oas"
+            else:
+                dates = pd.to_datetime(preview.iloc[header + 1:, 0], errors="coerce").dropna()
+                if dates.empty:
+                    continue
+                hourly = (dates != dates.dt.normalize()).any() or dates.dt.normalize().duplicated().any()
+                kind = "intraday" if hourly else "performance"
+            if kind == role:
+                matches.append({"sheet": name, "header": header})
+            break
+    if preferred is not None:
+        preferred_matches = [m for m in matches if m["sheet"] == preferred]
+        if preferred_matches:
+            return preferred_matches[0]
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous Citi {role} sheets: {[m['sheet'] for m in matches]}")
+    if not matches:
+        if role == "intraday":
+            return None
+        raise ValueError(f"No Citi {role} sheet found from series headers in {book.sheet_names}")
+    return matches[0]
+
+
+def _read_citi_sheet(fpath, role: str, preferred: Optional[str] = None):
+    with pd.ExcelFile(fpath) as book:
+        selected = _resolve_citi_sheet(book, role, preferred)
+        if selected is None:
+            return pd.DataFrame()
+        frame = pd.read_excel(book, sheet_name=selected["sheet"], header=selected["header"])
+    frame.attrs["source_sheet"] = selected["sheet"]
+    return frame
+
+
 def load_citi_oas_data(fpath: str | Path = CITI_FNAME) -> pd.DataFrame:
     """Load Citi MBS OAS data from mbs_rv_citi.xlsx.
 
@@ -440,7 +488,7 @@ def load_citi_oas_data(fpath: str | Path = CITI_FNAME) -> pd.DataFrame:
     if not fpath.exists():
         raise FileNotFoundError(f"Citi OAS file not found: {fpath}")
 
-    df = pd.read_excel(fpath, sheet_name=0, header=1)
+    df = _read_citi_sheet(fpath, "oas")
     date_col = df.columns[0]
     df = df.rename(columns={date_col: "date"})
     df["date"] = pd.to_datetime(df["date"])
@@ -536,7 +584,7 @@ def _parse_citi_perf_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_citi_perf_data(fpath: str | Path = CITI_FNAME) -> pd.DataFrame:
-    """Load Citi MBS performance vs 7Y UST from mbs_rv_citi.xlsx Sheet3.
+    """Load Citi MBS performance vs 7Y UST from the detected daily sheet.
 
     Row 1 contains headers like:
       RATES.MBS.MBS_PERF.FNMA.30Y.MBS_CPN_2_5.VS_7S_UST.DESK - CLOSE
@@ -545,7 +593,7 @@ def load_citi_perf_data(fpath: str | Path = CITI_FNAME) -> pd.DataFrame:
     if not fpath.exists():
         raise FileNotFoundError(f"Citi file not found: {fpath}")
 
-    df = pd.read_excel(fpath, sheet_name="Sheet3", header=1)
+    df = _read_citi_sheet(fpath, "performance")
     date_col = df.columns[0]
     df = df.rename(columns={date_col: "date"})
     df["date"] = pd.to_datetime(df["date"])
@@ -560,7 +608,7 @@ def load_citi_perf_data(fpath: str | Path = CITI_FNAME) -> pd.DataFrame:
 
 def load_citi_perf_intraday(
     fpath: str | Path = CITI_FNAME,
-    sheet: str = CITI_INTRADAY_SHEET,
+    sheet: Optional[str] = CITI_INTRADAY_SHEET,
     hour: int = CITI_INTRADAY_HOUR,
 ) -> pd.DataFrame:
     """Load the current-day intraday Citi perf mark from the intraday sheet.
@@ -574,12 +622,10 @@ def load_citi_perf_intraday(
     fpath = Path(fpath)
     if not fpath.exists():
         return pd.DataFrame()
-    try:
-        df = pd.read_excel(fpath, sheet_name=sheet, header=1)
-    except ValueError:
-        return pd.DataFrame()
+    df = _read_citi_sheet(fpath, "intraday", preferred=sheet)
     if df.empty:
         return pd.DataFrame()
+    source_sheet = df.attrs["source_sheet"]
 
     date_col = df.columns[0]
     df = df.rename(columns={date_col: "date"})
@@ -595,7 +641,9 @@ def load_citi_perf_intraday(
 
     out = mark.drop(labels="date").to_frame().T.apply(pd.to_numeric, errors="coerce")
     out.index = pd.DatetimeIndex([latest_date], name="date")
-    print(f"Loaded Citi intraday mark ({sheet}): {mark['date']} "
+    out.attrs["source_sheet"] = source_sheet
+    out.attrs["mark_timestamp"] = mark["date"]
+    print(f"Loaded Citi intraday mark ({source_sheet}): {mark['date']} "
           f"({out.shape[1]} coupons)")
     return out
 
@@ -4449,7 +4497,7 @@ def _assemble_report_data(
                 and citi_intraday_df.index[-1] > citi_perf_df.index[-1]
             ):
                 intraday_note = (
-                    f"  |  latest day = {CITI_INTRADAY_SHEET} "
+                    f"  |  latest day = {citi_intraday_df.attrs.get('source_sheet', 'intraday sheet')} "
                     f"{CITI_INTRADAY_HOUR}am intraday mark"
                 )
             payloads["citi_perf_subtitle"] = (
@@ -4749,7 +4797,7 @@ def generate_report(
                     and citi_intraday_df.index[-1] > citi_perf_df.index[-1]
                 ):
                     intraday_note = (
-                        f"  |  latest day = {CITI_INTRADAY_SHEET} "
+                        f"  |  latest day = {citi_intraday_df.attrs.get('source_sheet', 'intraday sheet')} "
                         f"{CITI_INTRADAY_HOUR}am intraday mark"
                     )
                 citi_perf_subtitle = (
