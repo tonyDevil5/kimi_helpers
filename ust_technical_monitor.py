@@ -629,7 +629,7 @@ def _overview_table_html(all_stats: Dict[str, Dict[str, Optional[Dict[str, objec
         "Chg 60d (bp)", f"RSI({RSI_PERIOD})", "%B", "vs SMA50 (bp)",
         "vs SMA200 (bp)", "Vol 20d (bp/yr)", "Fib zone",
     ]
-    parts = ['<div class="table-wrap"><table class="data-table"><thead><tr>']
+    parts = ['<div class="table-wrap"><table class="data-table sortable-table"><thead><tr>']
     parts += [f"<th>{html.escape(c)}</th>" for c in cols]
     parts.append("</tr></thead><tbody>")
     for country, series_names in COUNTRY_SERIES_ORDER.items():
@@ -687,6 +687,13 @@ box-shadow:0 3px 12px rgba(15,23,42,.06);padding:16px 18px}
 .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:6px;margin-bottom:12px}
 .data-table{border-collapse:collapse;font-size:12px;min-width:100%}
 .data-table th{background:#40466e;color:#fff;padding:5px 8px;font-weight:bold;text-align:center;white-space:nowrap}
+.sortable-table th{cursor:pointer;user-select:none}
+.sortable-table th.sort-asc::after{content:" ▲";font-size:9px}
+.sortable-table th.sort-desc::after{content:" ▼";font-size:9px}
+.table-tools{display:flex;gap:8px;align-items:center;margin:2px 0 6px;font-size:12px}
+.table-tools input[type=search]{padding:5px 8px;border:1px solid #b6c5cf;border-radius:6px;font-size:12px;min-width:180px}
+.table-tools button{border:1px solid #b6c5cf;background:#fff;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px}
+.table-count{color:var(--muted)}
 .data-table td{border:1px solid #e2e8f0;padding:4px 8px;text-align:center;white-space:nowrap}
 .data-table tbody tr:nth-child(even){background:#f0f0f0}
 .fib-note{font-size:12px;color:var(--muted);margin:4px 0 16px}
@@ -720,6 +727,20 @@ if(show)bl.querySelectorAll('.chart').forEach(el=>renderChart(el.id));
 window.scrollTo({top:0,behavior:'smooth'});
 }
 applyView();
+function cellValue(cell){const text=cell.textContent.trim().replace(/,/g,'');if(text==='')return {blank:true,num:false,value:''};const n=Number(text.replace(/(%|bp)$/,''));return Number.isFinite(n)?{blank:false,num:true,value:n}:{blank:false,num:false,value:text.toLowerCase()};}
+function csvCell(value){return '"'+value.replace(/"/g,'""')+'"';}
+document.querySelectorAll('.sortable-table').forEach((table,tableIndex)=>{
+const wrap=table.closest('.table-wrap');if(!wrap)return;const rows=[...table.tBodies[0].rows];const tools=document.createElement('div');tools.className='table-tools';
+const search=document.createElement('input');search.type='search';search.placeholder='Filter this table';search.setAttribute('aria-label','Filter this table');
+const reset=document.createElement('button');reset.type='button';reset.textContent='Reset sort';
+const csv=document.createElement('button');csv.type='button';csv.textContent='Download CSV';
+const count=document.createElement('span');count.className='table-count';tools.append(search,reset,csv,count);wrap.parentNode.insertBefore(tools,wrap);
+const refresh=()=>{let shown=0;rows.forEach(row=>{if(row.style.display!=='none')shown++;});count.textContent=`${shown} of ${rows.length} rows`;};refresh();
+search.addEventListener('input',()=>{const q=search.value.trim().toLowerCase();rows.forEach(row=>{row.style.display=(!q||row.textContent.toLowerCase().includes(q))?'':'none';});refresh();});
+table.querySelectorAll('th').forEach((th,col)=>th.addEventListener('click',()=>{const asc=!th.classList.contains('sort-asc');table.querySelectorAll('th').forEach(h=>h.classList.remove('sort-asc','sort-desc'));th.classList.add(asc?'sort-asc':'sort-desc');const sorted=[...rows].sort((a,b)=>{const av=cellValue(a.cells[col]),bv=cellValue(b.cells[col]);if(av.blank!==bv.blank)return av.blank?1:-1;let c;if(av.num&&bv.num)c=av.value-bv.value;else c=String(av.value).localeCompare(String(bv.value));return asc?c:-c;});sorted.forEach(row=>table.tBodies[0].appendChild(row));}));
+reset.addEventListener('click',()=>{rows.forEach(row=>table.tBodies[0].appendChild(row));table.querySelectorAll('th').forEach(h=>h.classList.remove('sort-asc','sort-desc'));});
+csv.addEventListener('click',()=>{const lines=[];lines.push([...table.tHead.rows[0].cells].map(c=>csvCell(c.textContent.trim())).join(','));[...table.tBodies[0].rows].filter(r=>r.style.display!=='none').forEach(r=>lines.push([...r.cells].map(c=>csvCell(c.textContent.trim())).join(',')));const blob=new Blob([lines.join('\\n')],{type:'text/csv;charset=utf-8'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='technical-summary.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);});
+});
 """
 
 
