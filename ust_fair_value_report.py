@@ -41,7 +41,10 @@ except ImportError:
     MATPLOTLIB_AVAILABLE = False
 
 # Add user's helper library path
-sys.path.append(r"D:\python\pycharm\pythonProject")
+_UST_HELPER_DIR = Path(r"D:\python\pycharm\pythonProject")
+if not (_UST_HELPER_DIR / "UstDurationModel.py").exists():
+    _UST_HELPER_DIR = Path.home() / "Nutstore" / "1" / "python" / "pycharm" / "pythonProject"
+sys.path.append(str(_UST_HELPER_DIR))
 try:
     from UstDurationModel import USTDurationStrategy
     from strategy import Context
