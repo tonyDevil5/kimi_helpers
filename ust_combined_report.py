@@ -49,11 +49,17 @@ def compress_text(value: str) -> str:
     return base64.b64encode(gzip.compress(value.encode('utf-8'), mtime=0)).decode('ascii')
 
 
-def prepare_documents(sources: list[tuple[str, str, Path]]) -> dict:
+def prepare_documents(sources: list[tuple[str, str, Path]], inline_plotly_js: str | None = None) -> dict:
     libraries: dict[str, str] = {}
     documents = []
     for key, title, path in sources:
         source = path.read_text(encoding='utf-8')
+        original_digest = hashlib.sha256(source.encode('utf-8')).hexdigest()
+        external = re.compile(r'<script\b[^>]*\bsrc=[\"\x27]https://cdn\.plot\.ly/plotly[^\"\x27]*[\"\x27][^>]*>\s*</script\s*>', re.I)
+        inlined = False
+        if inline_plotly_js is not None and external.search(source):
+            source = external.sub(lambda _: '<script>'+inline_plotly_js+'</script>', source)
+            inlined = True
         if not re.search(r'<html\b', source, re.I) or not re.search(r'</html\s*>', source, re.I):
             raise ValueError(f'Incomplete HTML report: {path}')
         library_ids = []
@@ -71,19 +77,22 @@ def prepare_documents(sources: list[tuple[str, str, Path]]) -> dict:
         if len(library_ids) != 1:
             raise ValueError(f'Expected one embedded Plotly library in {path}, found {len(library_ids)}')
         dates = re.findall(r'20\d{6}', path.stem)
-        source_label = f'Report dated {dates[-1][:4]}-{dates[-1][4:6]}-{dates[-1][6:]}' if dates else 'Treasury CTA comparison'
+        source_label = f'Report dated {dates[-1][:4]}-{dates[-1][4:6]}-{dates[-1][6:]}' if dates else title
         # Relative links in the original document retain their original meaning.
         if '<base ' not in document.lower():
             document = re.sub(r'(<head\b[^>]*>)', lambda m: m.group(0) +
                 '<base href="' + html.escape(path.resolve().as_uri(), quote=True) + '">', document, count=1, flags=re.I)
         documents.append(dict(id=key, title=title, source=path.name, source_label=source_label,
             library=library_ids[0], data=compress_text(document),
-            source_sha256=hashlib.sha256(source.encode('utf-8')).hexdigest()))
+            source_sha256=hashlib.sha256(source.encode('utf-8')).hexdigest(),
+            original_source_sha256=original_digest, plotly_inlined=inlined))
     return dict(libraries=libraries, documents=documents)
 
 
-def build_report(sources: list[tuple[str, str, Path]], output: Path = DEFAULT_OUTPUT) -> Path:
-    payload = prepare_documents(sources)
+def build_report(sources: list[tuple[str, str, Path]], output: Path = DEFAULT_OUTPUT,
+                 title: str = 'Treasury Research Monitor', inline_plotly_js: str | None = None) -> Path:
+    payload = prepare_documents(sources, inline_plotly_js=inline_plotly_js)
+    payload['title'] = title
     generated = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M China time')
     buttons = ''.join(f'<a class="nav-link" role="tab" id="tab-{d["id"]}" '
         f'aria-controls="panel-{d["id"]}" aria-selected="false" href="#{d["id"]}">'
@@ -93,13 +102,13 @@ def build_report(sources: list[tuple[str, str, Path]], output: Path = DEFAULT_OU
         f'id="frame-{d["id"]}"></iframe></section>' for d in payload['documents'])
     page = '''<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Treasury Research Monitor</title><style>
+<title>REPORT_TITLE</title><style>
 *{box-sizing:border-box}html,body{height:100%;margin:0}body{font:14px Arial,sans-serif;color:#183247;background:#eef3f7;display:flex;flex-direction:column}
 header{flex:none;background:#12344d;color:white;padding:15px 22px 0;box-shadow:0 2px 8px #0002}h1{font-size:22px;margin:0 0 5px}.meta{color:#c7d7e3;font-size:12px;margin:0 0 12px}
 nav{display:flex;gap:8px;flex-wrap:wrap}.nav-link{padding:12px 18px;text-decoration:none;color:#e3edf5;border-radius:7px 7px 0 0;font-weight:bold;background:#ffffff13}.nav-link:hover,.nav-link:focus-visible{background:#ffffff30}.nav-link[aria-selected=true]{color:#12344d;background:#fff}
 .status-bar{flex:none;display:flex;align-items:center;justify-content:space-between;gap:15px;padding:9px 22px;background:white;border-bottom:1px solid #d6e1e8;color:#526574;font-size:12px}#status{margin:0}.help{white-space:nowrap}main{flex:1;min-height:0}.report-panel{height:100%}.report-panel[hidden]{display:none}iframe{border:0;width:100%;height:100%;display:block;background:white}
 @media(max-width:650px){header{padding:12px 10px 0}h1{font-size:18px}.nav-link{padding:10px;font-size:12px}.status-bar{padding:8px 10px}.help{display:none}}
-</style></head><body><header><h1>Treasury Research Monitor</h1>
+</style></head><body><header><h1>REPORT_TITLE</h1>
 <p class="meta">One interactive report · Packaged GENERATED · Source dates shown below; packaging does not refresh market data.</p>
 <nav role="tablist" aria-label="Report sections">BUTTONS</nav></header>
 <div class="status-bar"><p id="status" role="status" aria-live="polite">Loading report…</p><span class="help">Links can be bookmarked · Chart controls stay within each section</span></div>
@@ -139,7 +148,7 @@ async function selectSection(){
     link.setAttribute('aria-selected',String(selected));link.tabIndex=selected?0:-1;
   });
   DATA.documents.forEach(d=>{document.getElementById('panel-'+d.id).hidden=d.id!==doc.id;});
-  document.title=doc.title+' | Treasury Research Monitor';
+  document.title=doc.title+' | '+DATA.title;
   document.getElementById('status').textContent='Loading '+doc.title+'…';
   if(!LOADING.has(doc.id)) LOADING.set(doc.id,loadDocument(doc));
   try{
@@ -166,7 +175,7 @@ document.querySelector('nav').addEventListener('keydown',event=>{
 window.addEventListener('hashchange',selectSection);
 selectSection();
 </script></body></html>'''
-    page = page.replace('GENERATED', html.escape(generated)).replace('BUTTONS', buttons).replace('PANELS', panels)
+    page = page.replace('REPORT_TITLE', html.escape(title)).replace('GENERATED', html.escape(generated)).replace('BUTTONS', buttons).replace('PANELS', panels)
     page = page.replace('PAYLOAD', json.dumps(payload, separators=(',', ':')).replace('</', '<\\/'))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(page, encoding='utf-8')

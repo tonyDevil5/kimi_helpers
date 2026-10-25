@@ -19,6 +19,7 @@ Thumbs.db
 
 # Generated reports, market-data snapshots and temporary working files
 /mbs_rv_output/
+/mbs_combined_output/
 /ust_fair_value_output/
 /ust_technical_output/
 /ust_combined_output/
