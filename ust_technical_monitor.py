@@ -1,9 +1,10 @@
 r"""
 Sovereign & MBS Technical Monitor
 =================================
-Interactive technical-analysis monitor for benchmark government yields at
-2Y/5Y/10Y/20Y/30Y across five countries — US (UST), France (OAT), Italy (BTP),
-Germany (Bund) and Japan (JGB) — plus MBS current-coupon OAS (FN and G2).
+Interactive technical-analysis and DM-comparison monitor for benchmark yields at
+2Y/5Y/7Y/10Y/20Y/30Y across US, France, Italy, Germany, Japan, Spain and the UK,
+plus MBS current-coupon OAS (FN and G2). DM additions include funding/carry,
+longer-horizon performance, 10Y country spreads, yield curves and yield quantiles.
 
 1. Pulls generic government yield tickers (GT* Govt family) and the
    current-coupon OAS indices (.FNCC105 / .G2CC105 G Index) from Bloomberg
@@ -45,7 +46,7 @@ REPORT_TITLE = "Sovereign & MBS Technical Monitor"
 
 START_DATE = "2010-01-01"
 
-TENORS = ["2Y", "5Y", "10Y", "20Y", "30Y"]
+TENORS = ["2Y", "5Y", "7Y", "10Y", "20Y", "30Y"]
 MBS_SERIES = ["FN CC", "G2 CC"]
 
 # country code -> series label -> ticker
@@ -55,13 +56,16 @@ COUNTRY_TICKERS: Dict[str, Dict[str, str]] = {
     "btp": {t: f"GTITL{t[:-1]}Y Govt" for t in TENORS},
     "bund": {t: f"GTDEM{t[:-1]}Y Govt" for t in TENORS},
     "jgb": {t: f"GTJPY{t[:-1]}Y Govt" for t in TENORS},
+    "esp": {t: f"GTESP{t[:-1]}Y Govt" for t in TENORS},
+    "uk": {t: f"GUKG{t[:-1]} Index" for t in TENORS},
     "mbs": {"FN CC": ".FNCC105 G Index", "G2 CC": ".G2CC105 G Index"},
 }
 COUNTRY_SERIES_ORDER: Dict[str, List[str]] = {
-    **{c: TENORS for c in ("ust", "frf", "btp", "bund", "jgb")},
+    **{c: TENORS for c in ("ust", "frf", "btp", "bund", "jgb", "esp", "uk")},
     "mbs": MBS_SERIES,
 }
 COUNTRY_LABELS = {"ust": "UST", "frf": "FRF", "btp": "BTP", "bund": "Bund", "jgb": "JGB", "mbs": "MBS"}
+COUNTRY_LABELS.update(esp="Bono", uk="Gilt")
 COUNTRY_NAMES = {
     "ust": "UST (US)",
     "frf": "OAT (France)",
@@ -69,16 +73,21 @@ COUNTRY_NAMES = {
     "bund": "Bund (Germany)",
     "jgb": "JGB (Japan)",
     "mbs": "MBS",
+    "esp": "Bono (Spain)",
+    "uk": "Gilt (UK)",
 }
 COUNTRY_SHORT = {"ust": "UST", "frf": "OAT", "btp": "BTP", "bund": "Bund", "jgb": "JGB", "mbs": "MBS"}
+COUNTRY_SHORT.update(esp="Bono", uk="Gilt")
 COUNTRY_COLORS = {
     "ust": "#dc2626",
     "frf": "#2563eb",
     "btp": "#059669",
     "bund": "#d97706",
     "jgb": "#7c3aed",
+    "esp": "#8c564b",
+    "uk": "#0891b2",
 }
-COUNTRY_UNITS = {**{c: "%" for c in ("ust", "frf", "btp", "bund", "jgb")}, "mbs": "bp"}
+COUNTRY_UNITS = {**{c: "%" for c in ("ust", "frf", "btp", "bund", "jgb", "esp", "uk")}, "mbs": "bp"}
 
 SMA_WINDOWS = [20, 50, 100, 200]
 BOLL_WINDOW = 20
@@ -93,6 +102,7 @@ MIN_OBS = 30  # below this a series is treated as unavailable
 TENOR_COLORS = {
     "2Y": "#2563eb",
     "5Y": "#059669",
+    "7Y": "#0891b2",
     "10Y": "#dc2626",
     "20Y": "#d97706",
     "30Y": "#7c3aed",
@@ -543,7 +553,7 @@ def _fig_overview_10y(all_stats: Dict[str, Dict[str, Optional[Dict[str, object]]
             )
         )
     fig.update_yaxes(title_text="Yield (%)")
-    _apply_layout(fig, "10Y Benchmark Yields - UST / OAT / BTP / Bund / JGB", height=560)
+    _apply_layout(fig, "10Y Benchmark Yields - All Covered Countries", height=560)
     return fig
 
 
@@ -741,6 +751,10 @@ table.querySelectorAll('th').forEach((th,col)=>th.addEventListener('click',()=>{
 reset.addEventListener('click',()=>{rows.forEach(row=>table.tBodies[0].appendChild(row));table.querySelectorAll('th').forEach(h=>h.classList.remove('sort-asc','sort-desc'));});
 csv.addEventListener('click',()=>{const lines=[];lines.push([...table.tHead.rows[0].cells].map(c=>csvCell(c.textContent.trim())).join(','));[...table.tBodies[0].rows].filter(r=>r.style.display!=='none').forEach(r=>lines.push([...r.cells].map(c=>csvCell(c.textContent.trim())).join(',')));const blob=new Blob([lines.join('\\n')],{type:'text/csv;charset=utf-8'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='technical-summary.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);});
 });
+const dmSelect=document.getElementById('dm-quantile-country');
+if(dmSelect)dmSelect.addEventListener('change',()=>{
+document.querySelectorAll('[data-dm-quantile]').forEach(panel=>{panel.hidden=panel.dataset.dmQuantile!==dmSelect.value;});
+});
 """
 
 
@@ -798,12 +812,14 @@ def build_html(
     all_stats: Dict[str, Dict[str, Optional[Dict[str, object]]]],
     as_of: date,
     report_path: Path,
+    dm_payload: Optional[Dict] = None,
 ) -> Path:
     builder = _ReportBuilder()
 
     # ALL overview section (default landing)
     overview_parts = [
         "<h2>Overview - All Countries</h2>",
+        '<p><button class="tgl-btn" onclick="setCountry(\'dm\')">DM comparison: carry, spreads, curves and quantiles →</button></p>',
         '<h4 class="ovh">Latest sovereign yields (%)</h4>',
         _overview_matrix_html(all_stats),
         '<h4 class="ovh">Cross-country technical summary</h4>',
@@ -823,6 +839,11 @@ def build_html(
             f'<section class="country-section" id="country-{country}" style="display:none">{body}</section>'
         )
 
+    if dm_payload is not None:
+        from ust_technical_dm import section_html
+        section_parts.append('<section class="country-section" id="country-dm" style="display:none">'
+            + section_html(builder, dm_payload) + '</section>')
+
     country_buttons = [
         '<button class="tgl-btn country-btn active" data-country="all" '
         'onclick="setCountry(\'all\')">ALL</button>'
@@ -832,6 +853,9 @@ def build_html(
             f'<button class="tgl-btn country-btn" data-country="{country}" '
             f'onclick="setCountry(\'{country}\')">{COUNTRY_LABELS[country]}</button>'
         )
+    if dm_payload is not None:
+        country_buttons.append('<button class="tgl-btn country-btn" data-country="dm" '
+            'onclick="setCountry(\'dm\')">DM comparison</button>')
     tenor_buttons = [
         '<button class="tgl-btn tenor-btn active" data-tenor="all" '
         'onclick="setTenor(\'all\')">ALL</button>'
@@ -910,6 +934,10 @@ def print_console_summary(
 # ---------------------------------------------------------------------------
 def main(start_date: str = START_DATE) -> Path:
     data, warnings_ = load_yields(start_date=start_date)
+    from dm_govy_report import load_funding_rates
+    from ust_technical_dm import build_payload
+    funding = load_funding_rates(start_date=start_date)
+    dm_payload = build_payload(data, funding, COUNTRY_NAMES, TENORS)
 
     print("Computing technical indicators...")
     all_stats: Dict[str, Dict[str, Optional[Dict[str, object]]]] = {}
@@ -932,7 +960,7 @@ def main(start_date: str = START_DATE) -> Path:
     report_path = OUTPUT_DIR / f"UST_Technical_Monitor_{as_of.strftime('%Y%m%d')}.html"
 
     print("Building interactive HTML report...")
-    build_html(all_stats, as_of, report_path)
+    build_html(all_stats, as_of, report_path, dm_payload=dm_payload)
 
     print_console_summary(all_stats, warnings_, report_path)
     return report_path

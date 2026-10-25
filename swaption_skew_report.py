@@ -7,7 +7,8 @@ Reads:
     D:\python\notebook\data\mbs\mbs_rv.xlsx  sheet "Data1"
 
 Outputs:
-    ./swaption_skew_output/Swaption_Skew_Report.pdf
+    ./swaption_skew_output/Swaption_Skew_Report_Interactive_<date>.html
+    Optional PDF with --format pdf
 
 Contents:
     - Summary table of risk reversals vs CT10
@@ -17,12 +18,14 @@ Contents:
     - 1y10y ATM volatility time series
 
 Run:
-    python swaption_skew_report.py
+    python swaption_skew_report.py  # interactive HTML
+    python swaption_skew_report.py --format pdf
 """
 
 from __future__ import annotations
 
 import warnings
+import argparse
 from datetime import date
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -44,7 +47,11 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-FNAME = r"D:\python\notebook\data\mbs\mbs_rv.xlsx"
+_SOURCE_CANDIDATES = [
+    Path(r"D:\python\notebook\data\mbs\mbs_rv.xlsx"),
+    Path.home() / 'Nutstore' / '1' / 'python' / 'notebook' / 'data' / 'mbs' / 'mbs_rv.xlsx',
+]
+FNAME = str(next((p for p in _SOURCE_CANDIDATES if p.exists()), _SOURCE_CANDIDATES[0]))
 OUTPUT_DIR = Path(__file__).parent / "swaption_skew_output"
 
 OPTION_TENORS = ["3m10y", "1y10y", "3y10y"]
@@ -64,18 +71,29 @@ def load_data(file_path: str = FNAME, sheet: str = "Data1") -> pd.DataFrame:
     df = pd.read_excel(fpath, sheet_name=sheet)
     date_col = df.columns[0]
     df = df.rename(columns={date_col: "date"})
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.set_index("date").sort_index()
+    df["date"] = pd.to_datetime(df["date"], errors='coerce')
+    df = df.dropna(subset=['date']).set_index("date").sort_index()
     if "10y" not in df.columns:
         # Workbook updates occasionally drop the '10y' header; the yield
         # column sits directly after the date column.
         df = df.rename(columns={df.columns[0]: "10y"})
+    required = [UNDERLYING_COL] + [f'{tenor}_{side}' for tenor in OPTION_TENORS for side in ['atm', 'p50', 'r50']]
+    missing = set(required) - set(df.columns)
+    if missing:
+        raise ValueError(f'Missing swaption source columns: {sorted(missing)}')
+    df = df[required].copy()
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.replace([np.inf, -np.inf], np.nan)
+    if df.index.has_duplicates:
+        raise ValueError('Duplicate dates in swaption source; resolve before computing observation changes.')
+    if df.empty:
+        raise ValueError('No dated swaption observations in the workbook.')
 
     print(f"Loaded {fpath.name} sheet '{sheet}': {df.shape[0]} rows x {df.shape[1]} cols, "
           f"{df.index[0].date()} to {df.index[-1].date()}")
-    return df.dropna()
+    # Keep the source calendar: do not shorten horizons or fill missing quotes.
+    return df
 
 
 def compute_risk_reversals(df: pd.DataFrame, tenors: List[str] = OPTION_TENORS) -> pd.DataFrame:
@@ -508,10 +526,10 @@ def generate_pdf_report(
     return pdf_path
 
 
-def main() -> None:
+def main(report_format='interactive', file_path=FNAME) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    df = load_data()
+    df = load_data(file_path)
     rr_df = compute_risk_reversals(df)
     summary = build_summary(df, rr_df)
 
@@ -521,9 +539,17 @@ def main() -> None:
     print(summary.to_string())
     print("=" * 70)
 
+    if report_format == 'interactive':
+        from swaption_skew_interactive import build_interactive_report
+        return build_interactive_report(df, rr_df, source_path=Path(file_path))
     pdf_path = generate_pdf_report(df, rr_df, summary)
     print(f"PDF report saved to: {pdf_path}")
+    return pdf_path
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--format', choices=['interactive', 'pdf'], default='interactive')
+    parser.add_argument('--source', type=Path, default=Path(FNAME), help='Workbook containing Data1')
+    args = parser.parse_args()
+    main(args.format, args.source)
