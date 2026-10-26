@@ -36,6 +36,7 @@ def latest_report(folder: Path, pattern: str) -> Path:
 def refresh_reports(backtest_root: Path) -> None:
     jobs = [
         (ROOT, ['ust_fair_value_report.py', '--format', 'interactive']),
+        (ROOT, ['bund_fair_value_report.py']),
         (ROOT, ['ust_technical_monitor.py']),
         (ROOT, ['swaption_skew_report.py', '--format', 'interactive']),
         (backtest_root, ['strategy_example/ust10y_cta_comparison.py', '--update']),
@@ -195,6 +196,7 @@ def main():
         refresh_reports(args.backtest_root)
     sources = [
         ('fair-value', 'UST fair value', latest_report(ROOT/'ust_fair_value_output', 'UST_FairValue_Report_Interactive_????????.html')),
+        ('bund-fair-value', 'Bund fair value', latest_report(ROOT/'bund_fair_value_output', 'Bund_FairValue_Report_????????.html')),
         ('technical', 'Technical & DM gov bonds', latest_report(ROOT/'ust_technical_output', 'UST_Technical_Monitor_????????.html')),
         ('momentum', 'Momentum & walk-forward', args.backtest_root/'strategy_example'/'ust10y_momentum_output'/'ust10y_cta_strategy_comparison.html'),
         ('swaptions', 'Swaption vol & skew', latest_report(ROOT/'swaption_skew_output', 'Swaption_Skew_Report_Interactive_????????.html')),

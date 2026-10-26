@@ -25,11 +25,12 @@ REPORT_TITLE = "MBS RV Analysis Report"
 
 NAV_GROUP_ORDER = [
     "Overview",
+    "Current-coupon basis",
+    "OAS",
     "Coupon structures",
     "G2 & FN relative value",
     "Yield basis",
     "Performance",
-    "Current-coupon basis",
     "Appendix",
 ]
 
@@ -1623,7 +1624,7 @@ def _build_oas_pages(b: _ReportBuilder, payloads: Dict) -> None:
     oas_summary = payloads.get("oas_summary")
     if oas_summary is not None and not oas_summary.empty:
         b.add_table(
-            "FN / G2 TSY OAS vs 1-Year History Z-Score", "Performance",
+            "FN / G2 TSY OAS vs 1-Year History Z-Score", "OAS",
             _df_to_html_table(
                 oas_summary.reset_index(),
                 gradient_columns=["z_score"],
@@ -1635,7 +1636,7 @@ def _build_oas_pages(b: _ReportBuilder, payloads: Dict) -> None:
     citi_oas_summary = payloads.get("citi_oas_summary")
     if citi_oas_summary is not None and not citi_oas_summary.empty:
         b.add_table(
-            "Citi FN / G2 OAS vs 90-Day History Z-Score", "Performance",
+            "Citi FN / G2 OAS vs 90-Day History Z-Score", "OAS",
             _df_to_html_table(
                 citi_oas_summary.reset_index(),
                 gradient_columns=["z_score_90d"],

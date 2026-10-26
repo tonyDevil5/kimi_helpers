@@ -33,6 +33,8 @@ Thumbs.db
 /inst_fut_position_output/
 /month_end_equity_bond_output/
 /swap_spread_output/
+/bund_fair_value_output/
+/estr_euribor_output/
 /swaption_skew_output/
 /ust_on_off_the_run_output/
 /_tmp_*

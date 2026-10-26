@@ -969,6 +969,7 @@ def plot_current_coupon_fitted(
 
 def build_current_coupon_params_table(df_basis: pd.DataFrame) -> pd.DataFrame:
     """Return regression coefficients / std err / t-stat / p-value for each CC type."""
+    latest_row = df_basis.iloc[-1]
     rows = []
     for col, name in [("FNCC", "Conventional"), ("G2CC", "Ginnie")]:
         if col not in df_basis.columns:
@@ -979,6 +980,11 @@ def build_current_coupon_params_table(df_basis: pd.DataFrame) -> pd.DataFrame:
                 {
                     "cc_type": name,
                     "feature": param,
+                    "latest_value": (
+                        round(float(latest_row[param]), 4)
+                        if param in df_basis.columns
+                        else np.nan
+                    ),
                     "coef": float(model.params[param]),
                     "std_err": float(model.bse[param]),
                     "t_stat": float(model.tvalues[param]),

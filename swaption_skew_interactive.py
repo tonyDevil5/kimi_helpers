@@ -55,7 +55,7 @@ def build_interactive_report(df, rr_df, source_path, report_path=None):
 
     def add(fig, title):
         fig.update_layout(template='plotly_white', title=title, height=540, hovermode='x unified',
-            legend=dict(orientation='h', y=1.12), margin=dict(t=95))
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0, xanchor='left'), margin=dict(t=95))
         fig.update_xaxes(rangeslider_visible=True)
         plots.append(fig.to_html(full_html=False, include_plotlyjs=False, config=dict(responsive=True, displaylogo=False)))
 
