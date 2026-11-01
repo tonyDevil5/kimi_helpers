@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SOFR forward monitor · __ASOF__</title>
+<style>
+:root{color-scheme:dark;--bg:#0b111a;--panel:#111c29;--line:#253447;--muted:#91a4b9;--text:#e8eff8;--lch:#5fd5c5;--cme:#9ca9ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px 'Segoe UI',Arial,sans-serif}main{max-width:1440px;margin:auto;padding:32px}header{display:flex;justify-content:space-between;gap:20px;align-items:center}h1{font-size:30px;letter-spacing:-1px;margin:6px 0 8px}h2{font-size:17px;margin:0 0 8px}.eyebrow{color:var(--lch);letter-spacing:2px;font-size:11px;font-weight:700}.muted,small{color:var(--muted)}p{line-height:1.6}.badge{border:1px solid var(--line);border-radius:20px;padding:8px 13px;display:inline-block}.demo{background:#382d14;color:#ffdc87;border:1px solid #70541f;padding:13px 18px;border-radius:10px;margin-top:18px}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:24px 0}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}.stat{font-size:25px;font-weight:600;margin:9px 0}.grid{display:grid;grid-template-columns:1.35fr 1fr;gap:18px}.panel{margin-bottom:18px}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;flex-wrap:wrap}button,select{background:#1b2b3e;color:var(--text);border:1px solid #3b526b;border-radius:6px;padding:8px 12px;font:inherit;cursor:pointer}button.active{background:#224c50;border-color:var(--lch);color:var(--lch)}.buttons{display:flex;gap:7px;flex-wrap:wrap}.chart{width:100%;height:auto;display:block}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;white-space:nowrap;font-variant-numeric:tabular-nums}th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.8px;text-align:right}td,th{padding:12px 13px;border-bottom:1px solid var(--line);text-align:right}td:first-child,th:first-child{text-align:left}tbody tr:hover{background:#1a2b3c}.lch{color:var(--lch)}.cme{color:var(--cme)}.positive{color:#76dfbb}.negative{color:#ff9fa7}.legend{display:flex;gap:18px;font-size:12px;margin:12px 0}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:currentColor}details summary{cursor:pointer;font-weight:600}details p{margin-bottom:0}.foot{font-size:12px;color:var(--muted);line-height:1.8}a{color:var(--lch)}svg text{font-family:'Segoe UI',Arial,sans-serif}svg circle:hover{r:7}footer{margin-top:20px} @media(max-width:900px){.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}main{padding:18px}header{align-items:flex-start}}@media(max-width:480px){.stats{grid-template-columns:1fr}h1{font-size:25px}}
+</style>
+</head>
+<body><main>
+<header><div><div class="eyebrow">RATES / USD SOFR</div><h1>Forward swap monitor</h1><div class="muted">LCH & CME · par rates · quoted maturities from 2–30Y</div></div><div><span class="badge" id="asof"></span><p class="muted" id="source"></p></div></header>
+<div id="demo"></div>
+<section class="stats" id="stats"></section>
+<div class="toolbar"><div class="buttons" aria-label="Forward tenor filter"><button class="active" data-filter="all">All forwards</button><button data-filter="1">1Y swaps</button><button data-filter="2">2Y swaps</button><button data-filter="3">3Y swaps</button><button data-filter="4">4Y swaps</button><button data-filter="5">5Y swaps</button><button data-filter="10">10Y swaps</button></div><button id="download">Export visible forwards CSV ↓</button></div>
+<section class="grid"><div class="panel"><h2>Forward par rates</h2><div class="muted">Annualized fixed rates (%) · start measured from spot</div><div class="legend"><span class="lch"><i class="dot"></i>LCH</span><span class="cme"><i class="dot"></i>CME</span></div><div id="rates"></div></div><div class="panel"><h2>Forward clearing basis</h2><p class="muted">CME minus LCH · basis points</p><div id="basis"></div></div></section>
+<section class="panel"><div class="toolbar"><div><h2>Forward basis heatmap · A × B</h2><span class="muted">CME − LCH (bp) · Rows: forward start from spot · Columns: swap tenor</span></div><div style="min-width:200px"><div style="height:10px;border-radius:5px;background:linear-gradient(90deg,rgb(18,65,76),rgb(103,64,170))"></div><div id="heatmap-scale" class="muted" style="display:flex;justify-content:space-between;margin-top:5px;font-size:12px"></div></div></div><div class="scroll"><table><thead id="matrix-head"></thead><tbody id="matrix-body"></tbody></table></div></section>
+<section class="panel"><div class="toolbar"><div><h2>Forward pricing details</h2><span class="muted">Hover over chart points for values. Rates shown to 5 decimals.</span></div><label>Sort by <select id="sort"><option value="forward">Forward</option><option value="basis">Basis, high to low</option><option value="lch">LCH rate, high to low</option></select></label></div><div class="scroll"><table><thead><tr><th>Forward</th><th>Effective</th><th>Maturity</th><th>LCH (%)</th><th>CME (%)</th><th>CME − LCH (bp)</th></tr></thead><tbody id="forward-table"></tbody></table></div></section>
+<section class="grid"><div class="panel"><h2>Spot par curve inputs</h2><p class="muted">Quoted maturities · LCH outright rates and basis-adjusted CME rates (%)</p><div class="legend"><span class="lch"><i class="dot"></i>LCH</span><span class="cme"><i class="dot"></i>CME</span></div><div id="spot"></div></div><div class="panel"><h2>Spot clearing basis</h2><p class="muted">USLCSS quoted maturities · raw CME–LCH basis (bp)</p><div class="legend"><span class="lch"><i class="dot"></i>Quoted basis</span></div><div id="spot-basis"></div></div></section><section class="panel"><details><summary>Inspect input quotes</summary><div class="scroll"><table><thead><tr><th>Maturity</th><th>LCH (%)</th><th>Raw basis (bp)</th><th>CME (%)</th><th>LCH ticker</th><th>Basis ticker</th><th>LCH / basis source</th></tr></thead><tbody id="inputs"></tbody></table></div></details></section>
+<section class="panel"><details><summary>Conventions, source & calibration</summary><div id="conventions" class="foot"></div></details></section>
+<footer class="foot">Snapshot report. Refreshing this page does not download market data; rerun sofr_forward_curve.py to generate a new snapshot.<br>Forward clearing basis is model-implied from separate venue curves. Short-end curve shape is assumed before the first 2Y pillar.</footer>
+</main>
+<script id="snapshot" type="application/json">__SNAPSHOT_JSON__</script>
+<script>
+'use strict';
+const data=JSON.parse(document.getElementById('snapshot').textContent),m=data.metadata;
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=(v,n=5)=>Number(v).toFixed(n), signed=v=>(v>=0?'+':'')+fmt(v,3);
+const $=id=>document.getElementById(id);let filter='all',visible=[];
+$('asof').textContent='As of '+m.asof;$('source').textContent='Source: '+m.source;
+if(!m.synthetic && data.quotes.some(r=>r.lch_status==='Interpolated'||r.basis_status==='Interpolated'))$('demo').innerHTML='<div class="demo">Bloomberg quotes + interpolated missing maturities. See input source labels below. Latest available quotes may have different update times.</div>';
+if(m.synthetic)$('demo').innerHTML='<div class="demo"><strong>SYNTHETIC DEMO</strong> · Illustrative quotes only. These are not market rates.</div>';
+const maxError=Math.max(...data.calibration.map(x=>Math.abs(x.error_bps)));
+const stats=[['Forward instruments',data.forwards.length,'8 forward starts × 6 swap tenors'],['Curve pillars',data.quotes.length+' per venue','Quoted maturities, 2Y–30Y'],['Largest forward basis',signed(data.forwards.reduce((a,b)=>Math.abs(a.cme_minus_lch_bps)>Math.abs(b.cme_minus_lch_bps)?a:b).cme_minus_lch_bps)+' bp','CME minus LCH'],['Max calibration error',maxError.toExponential(1)+' bp','All '+data.calibration.length+' input rates repriced']];
+$('stats').innerHTML=stats.map(([label,value,note])=>`<div class="card"><div class="muted">${esc(label)}</div><div class="stat">${esc(value)}</div><small>${esc(note)}</small></div>`).join('');
+function chart(target,rows,series,unit,bars=false){
+ const W=760,H=300,L=68,R=22,T=22,B=53,w=W-L-R,h=H-T-B;
+ const vals=rows.flatMap(r=>series.map(s=>r[s.key]));let lo=Math.min(...vals),hi=Math.max(...vals);
+ if(bars){lo=Math.min(0,lo);hi=Math.max(0,hi)}const pad=Math.max((hi-lo)*.17,.002);lo-=pad;hi+=pad;
+ const numericX=rows.every(r=>Number.isFinite(r.tenor_years));const first=rows[0].tenor_years,last=rows[rows.length-1].tenor_years;
+ const x=i=>L+(rows.length===1?w/2:(numericX?(rows[i].tenor_years-first)/(last-first):i/(rows.length-1))*w),y=v=>T+(hi-v)/(hi-lo)*h;
+ let svg=`<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(target+' chart in '+unit)}">`;
+ for(let i=0;i<=4;i++){const v=lo+(hi-lo)*i/4,yy=y(v);svg+=`<line x1="${L}" y1="${yy}" x2="${W-R}" y2="${yy}" stroke="#253447"/><text x="${L-10}" y="${yy+4}" text-anchor="end" fill="#91a4b9" font-size="12">${fmt(v,3)}</text>`}
+ if(bars)svg+=`<line x1="${L}" x2="${W-R}" y1="${y(0)}" y2="${y(0)}" stroke="#91a4b9"/>`;
+ rows.forEach((r,i)=>{if(rows.length<15||i%2===0||i===rows.length-1)svg+=`<text x="${x(i)}" y="${H-20}" text-anchor="middle" fill="#91a4b9" font-size="12">${esc(r.label)}</text>`});
+ for(const s of series){if(!bars)svg+=`<polyline fill="none" stroke="${s.color}" stroke-width="2.5" points="${rows.map((r,i)=>x(i)+','+y(r[s.key])).join(' ')}"/>`;
+ rows.forEach((r,i)=>{const v=r[s.key],title=esc(`${r.label} · ${s.label}: ${fmt(v,5)} ${unit}`);
+ if(bars){const bw=Math.min(38,w/rows.length*.5);svg+=`<rect x="${x(i)-bw/2}" y="${Math.min(y(0),y(v))}" width="${bw}" height="${Math.max(1,Math.abs(y(v)-y(0)))}" rx="3" fill="${v>=0?'#5fd5c5':'#ff9fa7'}"><title>${title}</title></rect>`}
+ else svg+=`<circle cx="${x(i)}" cy="${y(v)}" r="4" fill="${s.color}"><title>${title}</title></circle>`;});}
+ $(target).innerHTML=svg+'</svg>';
+}
+const rateSeries=[{key:'lch_rate_pct',label:'LCH',color:'#5fd5c5'},{key:'cme_rate_pct',label:'CME',color:'#9ca9ff'}];
+function render(){
+ renderMatrix();
+ visible=data.forwards.filter(r=>filter==='all'||r.forward.endsWith('y'+filter+'y'));
+ // Plot each swap-tenor family separately.
+ for(const [target,series,bars,unit] of [['rates',rateSeries,false,'%'],['basis',[{key:'cme_minus_lch_bps',label:'CME − LCH',color:'#5fd5c5'}],true,'bp']]){
+  $(target).innerHTML='';for(const tenor of [1,2,3,4,5,10]){const rows=visible.filter(r=>r.forward.endsWith('y'+tenor+'y')).map(r=>({...r,label:r.forward}));if(!rows.length)continue;const id=target+'-'+tenor;$(target).insertAdjacentHTML('beforeend',`<div class="muted">${tenor}Y swap tenor</div><div id="${id}"></div>`);chart(id,rows,series,unit,bars);}
+ }
+ const ordered=[...visible];if($('sort').value==='basis')ordered.sort((a,b)=>b.cme_minus_lch_bps-a.cme_minus_lch_bps);if($('sort').value==='lch')ordered.sort((a,b)=>b.lch_rate_pct-a.lch_rate_pct);
+ $('forward-table').innerHTML=ordered.map(r=>`<tr><td><strong>${esc(r.forward)}</strong></td><td>${esc(r.effective_date)}</td><td>${esc(r.maturity_date)}</td><td class="lch">${fmt(r.lch_rate_pct)}</td><td class="cme">${fmt(r.cme_rate_pct)}</td><td class="${r.cme_minus_lch_bps>=0?'positive':'negative'}">${signed(r.cme_minus_lch_bps)}</td></tr>`).join('');
+}
+function renderMatrix(){
+ const tenors=[1,2,3,4,5,10].filter(t=>filter==='all'||String(t)===filter);
+ const values=data.forwards.map(r=>r.cme_minus_lch_bps),lo=Math.min(...values),hi=Math.max(...values);
+ $('heatmap-scale').innerHTML='<span>'+signed(lo)+' bp</span><span>'+signed(hi)+' bp</span>';
+ $('matrix-head').innerHTML='<tr><th>Start / tenor</th>'+tenors.map(t=>'<th>'+t+'Y</th>').join('')+'</tr>';
+ $('matrix-body').innerHTML=Array.from({length:8},(_,i)=>i+3).map(start=>'<tr><td><strong>'+start+'Y</strong></td>'+tenors.map(t=>{
+  const r=data.forwards.find(r=>r.forward===start+'y'+t+'y');if(!r)return '<td>—</td>';
+  const v=r.cme_minus_lch_bps,weight=hi===lo?.5:(v-lo)/(hi-lo),rgb=[18+85*weight,65-weight,76+94*weight].map(Math.round).join(',');
+  return '<td style="background:rgb('+rgb+');color:#fff;font-size:16px;font-weight:600" title="'+esc(r.forward+' · CME minus LCH: '+signed(v)+' bp · '+r.effective_date+' to '+r.maturity_date)+'">'+signed(v)+'</td>';
+ }).join('')+'</tr>').join('');
+}
+document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('active',x===b));render()});$('sort').onchange=render;
+const inputs=data.quotes.map(r=>({...r,label:r.tenor_years+'Y',cme_rate_pct:r.lch_rate_pct+m.basis_sign*r.basis_bps/100}));chart('spot',inputs,rateSeries,'%');
+chart('spot-basis',inputs,[{key:'basis_bps',label:'USLCSS quoted basis',color:'#5fd5c5'}],'bp');
+$('inputs').innerHTML=inputs.map(r=>`<tr><td>${esc(r.label)}</td><td class="lch">${fmt(r.lch_rate_pct)}</td><td>${signed(r.basis_bps)}</td><td class="cme">${fmt(r.cme_rate_pct)}</td><td>${esc(r.lch_ticker||'User / demo input')}</td><td>${esc(r.basis_ticker||'User / demo input')}</td><td>${esc(r.lch_status||'Synthetic / file')} / ${esc(r.basis_status||'Synthetic / file')}</td></tr>`).join('');
+$('conventions').innerHTML=`<p>Retrieved: ${esc(m.retrieved_at||'Not recorded')}<br>Missing quote policy: ${esc(m.missing_quote_policy||'Reject missing quotes')}<br>Source: ${esc(m.source)} · Valuation date: ${esc(m.asof)} · ${m.synthetic?'Synthetic data':'Market quote snapshot'}<br>CME = LCH ${m.basis_sign===1?'+':'−'} raw basis (basis sign assumption).<br>${esc(m.frequency)} payments · ${esc(m.day_count)} coupons · Spot T+${m.settlement_days} · Payment lag ${m.payment_lag} business days · ${esc(m.business_day)} · ${esc(m.calendar)} calendar.<br>${esc(m.interpolation)} · ${esc(m.model)} · QuantLib ${esc(m.quantlib_version)}.<br>Calibration: ${data.calibration.length} quotes; maximum absolute error ${maxError.toExponential(4)} bp.</p>`;
+$('download').onclick=()=>{const keys=['forward','effective_date','maturity_date','lch_rate_pct','cme_rate_pct','cme_minus_lch_bps'];const text=[keys.join(','),...visible.map(r=>keys.map(k=>r[k]).join(','))].join('\r\n');const url=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='sofr_forwards_'+m.asof+(m.synthetic?'_demo':'')+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+render();
+</script></body></html>
