@@ -20,6 +20,7 @@ from plotly.offline import get_plotlyjs
 from plotly.subplots import make_subplots
 
 import mbs_rv_report as rv
+import mbs_rv_coupon_views as coupon_views
 
 REPORT_TITLE = "MBS RV Analysis Report"
 
@@ -1292,6 +1293,7 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
         )
 
     # Performance tables
+    coupon_views.add_performance(b, dat)
     b.add_table(
         "Performance Over Periods", "Performance",
         _df_to_html_table(payloads["perf_summary"], gradient_columns=payloads["perf_cols"]),
@@ -1521,6 +1523,7 @@ def _build_cc_pages(b: _ReportBuilder, payloads: Dict) -> None:
                     payloads["cc_rolling"], cc_type=cc_type, window=rv.CC_ROLLING_WINDOW
                 ),
             )
+        coupon_views.add_rolling(b, payloads.get("cb_basis"), _df_to_html_table)
         if df_basis is not None:
             _try_view(
                 b, "Conv vs Ginnie Current-Coupon OAS Spread (90-day z-score)", section, "fig",
@@ -1871,7 +1874,7 @@ def _write_html(report_path: Path, payloads: Dict, builder: _ReportBuilder) -> N
 <input id="filter" type="search" placeholder="Filter sections and charts" aria-label="Filter report">
 <nav>{''.join(nav_parts)}</nav></aside>
 <main><div class="topbar"><strong id="visibleCount">{len(pages)} views</strong><button id="topButton">Back to top</button></div>{''.join(page_parts)}</main>
-<script>{_JS}</script>
+<script>{_JS}\n{coupon_views.JS}</script>
 </body></html>"""
     report_path.write_text(document, encoding="utf-8")
 

@@ -1548,6 +1548,33 @@ def build_coupon_basis_df(
     return df
 
 
+def coupon_sort_key(name):
+    """Agency order FN, G2; coupon order numerical rather than lexical."""
+    agency, coupon = str(name).split()[:2]
+    return ({"FN": 0, "G2": 1}.get(agency, 2), float(coupon))
+
+
+def run_rolling_coupon_basis(df_basis: pd.DataFrame, window: int = 120) -> pd.DataFrame:
+    """Endpoint fits using the same in-window residual scale as CC rolling OLS."""
+    rows = []
+    predictors = df_basis[COUPON_BASIS_PREDICTORS].copy()
+    if COUPON_BASIS_LAG_PREDICTORS:
+        predictors = predictors.shift(1)
+    for name in df_basis.columns.difference(COUPON_BASIS_PREDICTORS, sort=False):
+        data = pd.concat([df_basis[name], predictors], axis=1).dropna().sort_index()
+        for end in range(window, len(data) + 1):
+            sample = data.iloc[end-window:end]
+            model = sm.OLS(sample[name], sm.add_constant(sample[COUPON_BASIS_PREDICTORS], has_constant="add")).fit()
+            actual = float(sample[name].iloc[-1])
+            fitted = float(model.fittedvalues.iloc[-1])
+            scale = float(np.std(model.resid, ddof=0))
+            rows.append(dict(date=sample.index[-1], structure=name, mkt_val=actual,
+                             mdl_val=fitted, resid=actual-fitted, resid_std=scale,
+                             resid_z=(actual-fitted)/scale if scale > 1e-10 else np.nan,
+                             r2=float(model.rsquared)))
+    return pd.DataFrame(rows).set_index("date").sort_index() if rows else pd.DataFrame()
+
+
 def run_coupon_basis_ols(
     df_basis: pd.DataFrame, response_col: str
 ) -> Tuple[pd.Series, pd.DataFrame, sm.regression.linear_model.RegressionResultsWrapper]:
