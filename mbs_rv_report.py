@@ -409,7 +409,7 @@ def build_tsy_oas_summary(oas_df: pd.DataFrame, lookback: int = TSY_OAS_LOOKBACK
             f"chg_{n}d": (
                 current - float(series.iloc[-1 - n]) if len(series) > n else np.nan
             )
-            for n in (5, 10, 20)
+            for n in (1, 5, 10, 20)
         }
         rows.append({
             "agency": agency,
@@ -537,7 +537,7 @@ def build_citi_oas_summary(oas_df: pd.DataFrame, lookback: int = 90) -> pd.DataF
             f"chg_{n}d": (
                 current - float(series.iloc[-1 - n]) if len(series) > n else np.nan
             )
-            for n in (5, 10, 20)
+            for n in (1, 5, 10, 20)
         }
         rows.append({
             "agency": agency,
@@ -868,8 +868,11 @@ def run_current_coupon_ols(
 ) -> Tuple[pd.Series, pd.DataFrame, sm.regression.linear_model.RegressionResultsWrapper]:
     """Run full-sample OLS for one current-coupon series.
 
-    Predictors are lagged by one day if CC_LAG_PREDICTORS is True, matching the
-    HK-hours convention that the MBS current coupon does not tick on the local date.
+    The fit excludes the latest observation (fits through t-1) so the live
+    print stays out-of-sample; use ``model.predict(X)`` for the fitted value
+    at the latest date. Predictors are lagged by one day if CC_LAG_PREDICTORS
+    is True, matching the HK-hours convention that the MBS current coupon does
+    not tick on the local date.
     """
     X = df_basis[CC_PREDICTORS].copy()
     if CC_LAG_PREDICTORS:
@@ -879,7 +882,8 @@ def run_current_coupon_ols(
     df = pd.concat([Y, X], axis=1).dropna()
     Y = df[response_col]
     X = sm.add_constant(df[CC_PREDICTORS])
-    model = sm.OLS(Y, X).fit()
+    fit_idx = Y.index[:-1] if len(Y) > 1 else Y.index
+    model = sm.OLS(Y.loc[fit_idx], X.loc[fit_idx]).fit()
     return Y, X, model
 
 
@@ -892,7 +896,7 @@ def build_current_coupon_summary(df_basis: pd.DataFrame) -> pd.DataFrame:
         Y, X, model = run_current_coupon_ols(df_basis, col)
         resid_std = float(np.std(model.resid))
         mkt = float(Y.iloc[-1])
-        mdl = float(model.fittedvalues.iloc[-1])
+        mdl = float(model.predict(X.iloc[-1:]).iloc[0])
         diff = mkt - mdl
         rows.append(
             {
@@ -914,10 +918,11 @@ def plot_current_coupon_fitted(
 ) -> plt.Figure:
     """One index's full-sample fitted/actual OAS and aligned residual history."""
     name = {"FNCC": "Conventional", "G2CC": "Ginnie"}[response_col]
-    Y, _, model = run_current_coupon_ols(df_basis, response_col)
+    Y, X, model = run_current_coupon_ols(df_basis, response_col)
+    fitted = model.predict(X)
     residual = model.resid
     resid_std = float(np.std(residual))
-    latest_resid = float(residual.iloc[-1])
+    latest_resid = float(Y.iloc[-1] - fitted.iloc[-1])
     ratio = latest_resid / resid_std if resid_std != 0 else np.nan
     fig, (ax, resid_ax) = plt.subplots(
         2, 1, figsize=(12, 8), sharex=True,
@@ -925,8 +930,8 @@ def plot_current_coupon_fitted(
     )
     ax.plot(Y.index, Y, color="firebrick", alpha=0.8, label="Actual OAS")
     ax.plot(
-        Y.index, model.fittedvalues, color="royalblue", alpha=0.85,
-        label="Full-sample fitted OAS",
+        Y.index, fitted, color="royalblue", alpha=0.85,
+        label="Full-sample fitted OAS (fit through t-1)",
     )
     lag_text = " (lagged 1d)" if CC_LAG_PREDICTORS else ""
     ax.set_title(
@@ -940,18 +945,19 @@ def plot_current_coupon_fitted(
     ax.text(
         0.98, 0.04,
         f"Latest actual: {Y.iloc[-1]:.2f} bps\n"
-        f"Latest fitted: {model.fittedvalues.iloc[-1]:.2f} bps\n"
+        f"Latest fitted (t-1 fit): {fitted.iloc[-1]:.2f} bps\n"
         f"Residual: {latest_resid:+.2f} bps  |  z = {ratio:.2f}",
         transform=ax.transAxes, fontsize=9, va="bottom", ha="right",
         bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.9),
     )
 
+    resid_full = Y - fitted
     resid_ax.axhline(0, color="black", linewidth=0.8)
     resid_ax.plot(
-        Y.index, residual, color="slateblue", linewidth=1,
+        resid_full.index, resid_full, color="slateblue", linewidth=1,
         label="Residual = actual - fitted",
     )
-    resid_ax.fill_between(Y.index, residual, 0, color="slateblue", alpha=0.15)
+    resid_ax.fill_between(resid_full.index, resid_full, 0, color="slateblue", alpha=0.15)
     resid_ax.set_ylabel("Residual (bps)")
     resid_ax.set_xlabel("Date")
     resid_ax.legend(fontsize=9, loc="upper right")
@@ -1012,10 +1018,11 @@ def run_rolling_current_coupon_basis(
             win = data.iloc[end_idx - window : end_idx]
             y_win = win[col]
             x_win = sm.add_constant(win[CC_PREDICTORS])
-            m = sm.OLS(y_win, x_win).fit()
+            # Fit through t-1 so the evaluated day stays out-of-sample.
+            m = sm.OLS(y_win.iloc[:-1], x_win.iloc[:-1]).fit()
 
             actual = float(y_win.iloc[-1])
-            fitted = float(m.fittedvalues.iloc[-1])
+            fitted = float(m.predict(x_win.iloc[-1:]).iloc[0])
             resid_std = float(np.std(m.resid))
             resid = actual - fitted
             results.append(

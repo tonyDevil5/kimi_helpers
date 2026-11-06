@@ -506,10 +506,11 @@ def _fig_structure_momentum(
 # ---------------------------------------------------------------------------
 def _fig_cc_fitted(df_basis: pd.DataFrame, response_col: str) -> go.Figure:
     name = {"FNCC": "Conventional", "G2CC": "Ginnie"}[response_col]
-    Y, _, model = rv.run_current_coupon_ols(df_basis, response_col)
+    Y, X, model = rv.run_current_coupon_ols(df_basis, response_col)
+    fitted = model.predict(X)
     residual = model.resid
     resid_std = float(np.std(residual))
-    latest_resid = float(residual.iloc[-1])
+    latest_resid = float(Y.iloc[-1] - fitted.iloc[-1])
     ratio = latest_resid / resid_std if resid_std != 0 else np.nan
     lag_text = " (lagged 1d)" if rv.CC_LAG_PREDICTORS else ""
 
@@ -522,12 +523,13 @@ def _fig_cc_fitted(df_basis: pd.DataFrame, response_col: str) -> go.Figure:
         row=1, col=1,
     )
     fig.add_trace(
-        go.Scatter(x=_xs(Y.index), y=_ys(model.fittedvalues), mode="lines",
-                   name="Full-sample fitted OAS", line=dict(color="royalblue", width=1.2)),
+        go.Scatter(x=_xs(Y.index), y=_ys(fitted), mode="lines",
+                   name="Full-sample fitted OAS (fit through t-1)", line=dict(color="royalblue", width=1.2)),
         row=1, col=1,
     )
+    resid_full = Y - fitted
     fig.add_trace(
-        go.Scatter(x=_xs(Y.index), y=_ys(residual), mode="lines", fill="tozeroy",
+        go.Scatter(x=_xs(Y.index), y=_ys(resid_full), mode="lines", fill="tozeroy",
                    name="Residual = actual - fitted",
                    line=dict(color="slateblue", width=1),
                    fillcolor="rgba(106, 90, 205, 0.15)"),
@@ -539,7 +541,7 @@ def _fig_cc_fitted(df_basis: pd.DataFrame, response_col: str) -> go.Figure:
     _add_annotation(
         fig,
         f"Latest actual: {Y.iloc[-1]:.2f} bps\n"
-        f"Latest fitted: {model.fittedvalues.iloc[-1]:.2f} bps\n"
+        f"Latest fitted (t-1 fit): {fitted.iloc[-1]:.2f} bps\n"
         f"Residual: {latest_resid:+.2f} bps  |  z = {ratio:.2f}",
         "x", "y", fontsize=10,
     )
@@ -1631,7 +1633,7 @@ def _build_oas_pages(b: _ReportBuilder, payloads: Dict) -> None:
             _df_to_html_table(
                 oas_summary.reset_index(),
                 gradient_columns=["z_score"],
-                diverging_columns=["chg_5d", "chg_10d", "chg_20d"],
+                diverging_columns=["chg_1d", "chg_5d", "chg_10d", "chg_20d"],
                 include_index=False,
             ),
             subtitle=payloads["oas_subtitle"],
@@ -1643,7 +1645,7 @@ def _build_oas_pages(b: _ReportBuilder, payloads: Dict) -> None:
             _df_to_html_table(
                 citi_oas_summary.reset_index(),
                 gradient_columns=["z_score_90d"],
-                diverging_columns=["chg_5d", "chg_10d", "chg_20d"],
+                diverging_columns=["chg_1d", "chg_5d", "chg_10d", "chg_20d"],
                 include_index=False,
             ),
             subtitle=payloads.get("citi_oas_subtitle"),
