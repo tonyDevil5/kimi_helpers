@@ -137,7 +137,7 @@ def forward_rate(curve, asof, start_years, length_years, settlement_days=2, paym
     handle = ql.YieldTermStructureHandle(curve)
     swap = ql.MakeOIS(
         ql.Period(length_years, ql.Years), ql.Sofr(handle), 0.0,
-        effectiveDate=start, settlementDays=settlement_days,
+        effectiveDate=start,
         paymentCalendar=calendar, endOfMonth=False,
         paymentFrequency=ql.Annual, paymentLag=payment_lag,
         paymentAdjustmentConvention=ql.ModifiedFollowing,
