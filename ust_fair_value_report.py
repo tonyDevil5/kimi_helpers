@@ -326,6 +326,28 @@ def _past_year_percentiles(series: pd.Series, window: int = PAST_YEAR_WINDOW) ->
     }
 
 
+SPREAD_CHANGE_WINDOWS = [1, 5, 20, 60, 120]
+SPREAD_Z_WINDOW = 250
+
+
+def build_spread_change_summary(merged_df: pd.DataFrame) -> pd.DataFrame:
+    """Latest level, 1/5/20/60/120d changes and 250d z-score per curve spread."""
+    rows = []
+    for crv1, crv2, name in CURVE_PAIRS:
+        spread = ((merged_df[crv1] - merged_df[crv2]) * 100.0).dropna()
+        if len(spread) < SPREAD_Z_WINDOW:
+            continue
+        latest = float(spread.iloc[-1])
+        row = {"curve": name, "latest": latest}
+        for w in SPREAD_CHANGE_WINDOWS:
+            row[f"chg_{w}d"] = float(spread.diff(w).iloc[-1])
+        hist = spread.iloc[-SPREAD_Z_WINDOW:]
+        std = float(hist.std(ddof=1))
+        row["z_250d"] = (latest - float(hist.mean())) / std if std != 0 else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("curve")
+
+
 def build_curve_summary_table(merged_df: pd.DataFrame) -> pd.DataFrame:
     """Summary table for all curve spreads."""
     rows = []
@@ -1078,6 +1100,7 @@ def _assemble_report_data(dat_final: pd.DataFrame) -> Dict:
         "merged_df": None,
         "curve_summary": None,
         "curve_subtitle": None,
+        "spread_change_summary": None,
         "fly_summary": None,
         "fly_subtitle": None,
     }
@@ -1105,6 +1128,7 @@ def _assemble_report_data(dat_final: pd.DataFrame) -> Dict:
         payloads.update(
             curve_summary=curve_summary,
             curve_subtitle=curve_subtitle,
+            spread_change_summary=build_spread_change_summary(merged_df),
             fly_summary=fly_summary,
             fly_subtitle=fly_subtitle,
         )

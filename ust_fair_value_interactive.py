@@ -725,6 +725,18 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
             _df_to_html_table(payloads["curve_summary"], gradient_columns=["diff", "ratio"]),
             subtitle=payloads.get("curve_subtitle"),
         )
+        if payloads.get("spread_change_summary") is not None:
+            _try_view(
+                b, "UST Curve Spread Changes (1/5/20/60/120d) and 250d Z-Score",
+                section, "table",
+                _df_to_html_table(
+                    payloads["spread_change_summary"],
+                    gradient_columns=[f"chg_{w}d" for w in ufr.SPREAD_CHANGE_WINDOWS]
+                    + ["z_250d"],
+                ),
+                subtitle="Level changes in bp over 1/5/20/60/120 observations; "
+                         "z_250d = current level vs trailing 250-observation mean/std",
+            )
         _try_view(
             b, "UST Curve Spreads: Actual vs Model Fitted", section, "fig",
             lambda: _fig_all_curves(payloads["merged_df"]),
