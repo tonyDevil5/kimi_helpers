@@ -4409,11 +4409,17 @@ def _assemble_report_data(
     cpn_fly_summary = add_ols_metrics_to_summary(dat, cpn_fly_summary)
     cpn_fly_summary = add_range_metrics_to_summary(dat, cpn_fly_summary)
 
-    # Reorder columns: time-slice scores first, then model stats, then mkt + historical range
-    time_cols = [f"{prefix}_t{i}" for i in range(len(DEFAULT_SCORE_INDICES)) for prefix in ("vals", "scores")]
-    model_cols = ["mdl_val", "resid_std", "r2", "resid_z"]
+    # Reorder columns: vals_t0 first with resid_z / mdl_val alongside, then the
+    # remaining time-slice scores, then the rest of the model + range stats.
+    # mkt_val is dropped: it duplicates vals_t0.
+    time_cols = ["vals_t0", "resid_z", "mdl_val", "scores_t0"] + [
+        f"{prefix}_t{i}"
+        for i in range(1, len(DEFAULT_SCORE_INDICES))
+        for prefix in ("vals", "scores")
+    ]
+    model_cols = ["resid_std", "r2"]
     coef_cols = ["coef_price", "coef_slope", "coef_carry", "coef_vol"]
-    market_cols = ["mkt_val", "carry", "hist_min", "hist_max", "range_ratio"]
+    market_cols = ["carry", "hist_min", "hist_max", "range_ratio"]
     cpn_fly_summary = cpn_fly_summary[time_cols + model_cols + market_cols + coef_cols]
 
     score_cols = ["scores_t0", "resid_z", "range_ratio"]
@@ -4618,7 +4624,7 @@ def _assemble_report_data(
         print(f"TSY OAS z-score section skipped: {exc}")
 
     # Citi FN / G2 OAS latest level vs 90-day history z-score
-    payloads.update(citi_oas_summary=None, citi_oas_subtitle=None)
+    payloads.update(citi_oas_df=None, citi_oas_summary=None, citi_oas_subtitle=None)
     try:
         citi_oas_df = load_citi_oas_data(CITI_FNAME)
         citi_oas_summary = build_citi_oas_summary(citi_oas_df, lookback=90)
@@ -4628,6 +4634,7 @@ def _assemble_report_data(
                 f"90-day lookback  |  "
                 f"z-score = (current - 90d mean) / 90d std"
             )
+        payloads["citi_oas_df"] = citi_oas_df
         payloads["citi_oas_summary"] = citi_oas_summary
     except Exception as exc:
         print(f"Citi OAS section skipped: {exc}")

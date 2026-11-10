@@ -1625,6 +1625,38 @@ def _build_cc_pages(b: _ReportBuilder, payloads: Dict) -> None:
                 )
 
 
+def _fig_oas_history(df: pd.DataFrame, title: str) -> go.Figure:
+    """Per-coupon OAS history, FN and G2 side by side, legend shows latest level."""
+    import plotly.colors as pc
+    palette = pc.qualitative.Set2 + pc.qualitative.Dark2
+    fig = make_subplots(
+        rows=1, cols=2, shared_yaxes=False, horizontal_spacing=0.07,
+        subplot_titles=["FN", "G2"],
+    )
+    coupons = sorted({str(c).split()[1] for c in df.columns}, key=float)
+    color_map = {cpn: palette[i % len(palette)] for i, cpn in enumerate(coupons)}
+    for j, agency in enumerate(["FN", "G2"]):
+        for col in sorted([c for c in df.columns if str(c).startswith(agency)],
+                          key=lambda c: float(str(c).split()[1])):
+            cpn = str(col).split()[1]
+            s = df[col].dropna()
+            if s.empty:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=_xs(s.index), y=_ys(s), mode="lines",
+                    name=f"{agency} {cpn}: {float(s.iloc[-1]):.1f} bps",
+                    legendgroup=cpn,
+                    showlegend=(j == 0),
+                    line=dict(color=color_map[cpn], width=1.2),
+                ),
+                row=1, col=j + 1,
+            )
+    fig.update_yaxes(title_text="OAS (bps)", row=1, col=1)
+    _apply_layout(fig, title, height=560)
+    return fig
+
+
 def _build_oas_pages(b: _ReportBuilder, payloads: Dict) -> None:
     oas_summary = payloads.get("oas_summary")
     if oas_summary is not None and not oas_summary.empty:
@@ -1638,6 +1670,12 @@ def _build_oas_pages(b: _ReportBuilder, payloads: Dict) -> None:
             ),
             subtitle=payloads["oas_subtitle"],
         )
+    oas_df = payloads.get("oas_df")
+    if oas_df is not None and not oas_df.empty:
+        _try_view(
+            b, "FN / G2 TSY OAS History", "OAS", "fig",
+            lambda: _fig_oas_history(oas_df, "FN / G2 TSY OAS History"),
+        )
     citi_oas_summary = payloads.get("citi_oas_summary")
     if citi_oas_summary is not None and not citi_oas_summary.empty:
         b.add_table(
@@ -1649,6 +1687,12 @@ def _build_oas_pages(b: _ReportBuilder, payloads: Dict) -> None:
                 include_index=False,
             ),
             subtitle=payloads.get("citi_oas_subtitle"),
+        )
+    citi_oas_df = payloads.get("citi_oas_df")
+    if citi_oas_df is not None and not citi_oas_df.empty:
+        _try_view(
+            b, "Citi FN / G2 OAS History", "OAS", "fig",
+            lambda: _fig_oas_history(citi_oas_df, "Citi FN / G2 OAS History"),
         )
 
 

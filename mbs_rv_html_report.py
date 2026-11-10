@@ -798,14 +798,15 @@ def generate_html_report(dat: pd.DataFrame, df_basis: Optional[pd.DataFrame] = N
     cpn_fly_summary = build_cpn_fly_summary_table(dat)
     cpn_fly_summary = add_ols_metrics_to_summary(dat, cpn_fly_summary)
     cpn_fly_summary = add_range_metrics_to_summary(dat, cpn_fly_summary)
-    time_cols = [
-        f"{prefix}_t{i}" for i in range(len(DEFAULT_SCORE_INDICES))
+    time_cols = ["vals_t0", "resid_z", "mdl_val", "scores_t0"] + [
+        f"{prefix}_t{i}"
+        for i in range(1, len(DEFAULT_SCORE_INDICES))
         for prefix in ("vals", "scores")
     ]
     cpn_fly_summary = cpn_fly_summary[
         time_cols
-        + ["mdl_val", "resid_std", "r2", "resid_z"]
-        + ["mkt_val", "carry", "hist_min", "hist_max", "range_ratio"]
+        + ["resid_std", "r2"]
+        + ["carry", "hist_min", "hist_max", "range_ratio"]
         + ["coef_price", "coef_slope", "coef_carry", "coef_vol"]
     ]
     date_labels = "  |  ".join(
