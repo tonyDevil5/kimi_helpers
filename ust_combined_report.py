@@ -39,6 +39,7 @@ def refresh_reports(backtest_root: Path) -> None:
         (ROOT, ['bund_fair_value_report.py']),
         (ROOT, ['ust_technical_monitor.py']),
         (ROOT, ['swaption_skew_report.py', '--format', 'interactive']),
+        (ROOT, ['swap_spread_report.py']),
         (backtest_root, ['strategy_example/ust10y_cta_comparison.py', '--update']),
     ]
     for cwd, args in jobs:
@@ -200,6 +201,7 @@ def main():
         ('technical', 'Technical & DM gov bonds', latest_report(ROOT/'ust_technical_output', 'UST_Technical_Monitor_????????.html')),
         ('momentum', 'Momentum & walk-forward', args.backtest_root/'strategy_example'/'ust10y_momentum_output'/'ust10y_cta_strategy_comparison.html'),
         ('swaptions', 'Swaption vol & skew', latest_report(ROOT/'swaption_skew_output', 'Swaption_Skew_Report_Interactive_????????.html')),
+        ('swap-spreads', 'Swap spreads', latest_report(ROOT/'swap_spread_output', 'SwapSpread_Report_????????.html')),
     ]
     build_report(sources, args.output)
 
