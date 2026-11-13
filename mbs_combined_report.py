@@ -30,10 +30,22 @@ def latest_mbs_rv(folder: Path) -> Path:
     return max(candidates)[-1]
 
 
+def latest_perf_regression(folder: Path) -> Path:
+    candidates = []
+    for path in folder.glob('MBS_Perf_Regression*.html'):
+        match = re.search(r'_(\d{8})(?:_\d{6})?$', path.stem)
+        if match:
+            candidates.append((match.group(1), path.name, path))
+    if not candidates:
+        raise FileNotFoundError(f'No MBS perf regression HTML in {folder}; run without --from-existing first.')
+    return max(candidates)[-1]
+
+
 def report_sources(backtest_root: Path):
     examples = backtest_root/'strategy_example'
     return [
         ('mbs-rv', 'MBS RV', latest_mbs_rv(ROOT/'mbs_rv_output')),
+        ('mbs-perf-regression', 'MBS performance regression', latest_perf_regression(ROOT/'mbs_perf_regression_output')),
         ('tba-strategies', 'TBA strategies', examples/'tba_strategy_output'/'tba_strategy_analysis.html'),
         ('jpm-mean-reversion', 'JPM performance mean reversion', examples/'jpm_coupon_mean_reversion_output'/'jpm_coupon_mean_reversion.html'),
         ('mbs-credit', 'MBS vs credit', examples/'mbs_credit_output'/'mbs_credit_basis_report_interactive.html'),
@@ -48,6 +60,7 @@ def refresh_reports(backtest_root: Path):
     env['PYTHONPATH'] = os.pathsep.join([str(ROOT), str(backtest_root), env.get('PYTHONPATH', '')])
     jobs = [
         (ROOT, ['mbs_rv_report.py', '--format', 'interactive']),
+        (ROOT, ['mbs_perf_regression.py']),
         (backtest_root, ['strategy_example/tba_strategy_backtest.py', '--update']),
         (backtest_root, ['strategy_example/jpm_coupon_mean_reversion.py']),
         (backtest_root, ['strategy_example/mbs_credit_basis_backtest.py', '--update']),

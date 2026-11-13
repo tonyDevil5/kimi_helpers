@@ -49,6 +49,9 @@ Thumbs.db
 
 /tba_drop_realization_output/
 
+/mbs_perf_regression_output/
 /sofr_forward_output/
 /eur_forward_basis_output/
 /sofr_butterfly_output/
+/ty_option_fly_arb_output/
+/mbs_origination_output/
