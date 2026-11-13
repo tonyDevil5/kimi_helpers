@@ -203,8 +203,11 @@ def main():
     write_csv(OUTPUT/f'EUR_Forward_Basis_{asof.replace("-", "")}.csv', forwards)
     write_csv(OUTPUT/f'EUR_Quotes_{asof.replace("-", "")}.csv', quotes)
     write_csv(OUTPUT/f'EUR_Calibration_{asof.replace("-", "")}.csv', calibration)
+    from plotly.offline import get_plotlyjs
     encoded = json.dumps(payload, allow_nan=False).replace('<', '\\u003c')
-    document = Path(__file__).with_name('eur_forward_basis_template.html').read_text(encoding='utf-8').replace('__SNAPSHOT_JSON__', encoded)
+    document = (Path(__file__).with_name('eur_forward_basis_template.html').read_text(encoding='utf-8')
+                .replace('__PLOTLY_JS__', get_plotlyjs())
+                .replace('__SNAPSHOT_JSON__', encoded))
     path = OUTPUT/f'EUR_Forward_Basis_Monitor_{asof.replace("-", "")}.html'
     path.write_text(document, encoding='utf-8')
     (OUTPUT/'EUR_Forward_Basis_Monitor.html').write_text(document, encoding='utf-8')
