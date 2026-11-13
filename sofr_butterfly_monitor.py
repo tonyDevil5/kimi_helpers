@@ -66,7 +66,7 @@ def par_forward(curve, asof, start_years, tenor_years):
     effective=calendar.advance(spot,ql.Period(start_years,ql.Years),ql.ModifiedFollowing)
     handle=ql.YieldTermStructureHandle(curve)
     swap=ql.MakeOIS(ql.Period(tenor_years,ql.Years),ql.Sofr(handle),0.,effectiveDate=effective,
-                    settlementDays=2,paymentCalendar=calendar,endOfMonth=False,
+                    paymentCalendar=calendar,endOfMonth=False,
                     paymentFrequency=ql.Annual,paymentLag=2,paymentAdjustmentConvention=ql.ModifiedFollowing,
                     fixedLegDayCount=ql.Actual360(),telescopicValueDates=True)
     swap.setPricingEngine(ql.DiscountingSwapEngine(handle))
