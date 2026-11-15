@@ -38,6 +38,8 @@ from plotly.offline import get_plotlyjs
 # Configuration
 # ---------------------------------------------------------------------------
 FNAME = r"D:\python\notebook\data\mbs\mbs_rv_citi.xlsx"
+if not Path(FNAME).exists():
+    FNAME = r"C:\Users\tonyy\Nutstore\1\python\notebook\data\mbs\mbs_rv_citi.xlsx"
 SHEET_NAME = "EUR_ESTR_EURIBOR"
 OUTPUT_DIR = Path(__file__).parent / "estr_euribor_output"
 

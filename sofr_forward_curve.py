@@ -15,8 +15,8 @@ from pathlib import Path
 import QuantLib as ql
 
 
-TENORS = (2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30)
-FORWARD_STARTS = tuple(range(3, 11))
+TENORS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30)
+FORWARD_STARTS = tuple(range(0, 11))
 SWAP_TENORS = (1, 2, 3, 4, 5, 10)
 FORWARDS = [(start, tenor) for start in FORWARD_STARTS for tenor in SWAP_TENORS]
 
@@ -43,7 +43,7 @@ def validate_quotes(rows):
             raise ValueError("Implausible quote at {}Y; check percent/bp units".format(n))
         indexed[n] = dict(row, tenor_years=n, lch_rate_pct=rate, basis_bps=basis)
     if set(indexed) != set(TENORS):
-        raise ValueError("Supply exactly one quote for each supported tenor: 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30")
+        raise ValueError("Supply exactly one quote for each supported tenor: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30")
     return [indexed[n] for n in TENORS]
 
 
@@ -157,6 +157,9 @@ def main():
     parser.add_argument("--lch-template", default="USOSFR{n} Curncy")
     parser.add_argument("--basis-template", default="USLCSS{n} Curncy")
     parser.add_argument("--latest", action="store_true", help="Use latest available Bloomberg BDP quotes; individual quotes may be stale")
+    parser.add_argument("--history", action="store_true", help="Update persistent historical quotes and forwards")
+    parser.add_argument("--history-years", type=int, default=3)
+    parser.add_argument("--rebuild-history", action="store_true")
     parser.add_argument("--field", default="PX_LAST")
     parser.add_argument("--basis-sign", type=int, choices=[-1, 1], default=1,
                         help="CME = LCH + sign * basis; default +1 (CME minus LCH)")
@@ -165,6 +168,8 @@ def main():
     parser.add_argument("--output-dir", type=Path,
                         default=Path(__file__).resolve().parent / "sofr_forward_output")
     args = parser.parse_args()
+    if args.history and (args.demo or args.quotes_csv or args.history_years < 1):
+        parser.error('History requires Bloomberg inputs and a positive history window')
     if args.latest and (args.demo or args.quotes_csv):
         parser.error("--latest is only valid for Bloomberg input")
     if args.latest and args.asof != datetime.now(timezone(timedelta(hours=8))).date().isoformat():
@@ -173,9 +178,24 @@ def main():
         parser.error("Settlement days and payment lag must be nonnegative")
     asof = ql.DateParser.parseISO(args.asof)
     calendar = ql.UnitedStates(ql.UnitedStates.GovernmentBond)
+    if args.history and not calendar.isBusinessDay(asof):
+        asof = calendar.adjust(asof, ql.Preceding)
+        args.asof = asof.ISO()
+        args.latest = False
     if not calendar.isBusinessDay(asof):
         parser.error("--asof must be a US Government Bond business day")
-    if args.demo:
+    history, history_failures = [], []
+    if args.history:
+        import sofr_forward_curve as core
+        from sofr_forward_history import update
+        history, history_failures = update(core, args)
+        # Use the latest complete historical snapshot, keeping display and cache aligned.
+        args.asof = max(r['date'] for r in history)
+        asof = ql.DateParser.parseISO(args.asof)
+        import pandas as pd
+        quotes = pd.read_csv(args.output_dir / 'history' / 'input_quotes.csv', float_precision='round_trip')
+        rows = quotes.loc[quotes.date == args.asof].to_dict('records')
+    elif args.demo:
         rows = [dict(tenor_years=n, lch_rate_pct=3.3 + 0.025*n,
                      basis_bps=0.4 + 0.035*n) for n in TENORS]
     elif args.quotes_csv:
@@ -210,7 +230,7 @@ def main():
     metadata = dict(asof=args.asof, synthetic=args.demo, quantlib_version=ql.__version__,
                     source=str(args.quotes_csv) if args.quotes_csv else ("demo" if args.demo else ("Bloomberg BDP latest available (individual quotes may be stale)" if args.latest else "Bloomberg BDH")),
                     retrieved_at=datetime.now(timezone(timedelta(hours=8))).isoformat(),
-                    missing_quote_policy="Reject missing quotes; use only the 14 supported market maturities",
+                    missing_quote_policy="Reject missing quotes; use only the 15 supported market maturities",
                     pillar_tenors=list(TENORS),
                     lch_template=args.lch_template, basis_template=args.basis_template,
                     field=args.field, basis_sign=args.basis_sign,
@@ -218,11 +238,14 @@ def main():
                     settlement_days=args.settlement_days, payment_lag=args.payment_lag,
                     calendar="US Government Bond", day_count="Actual/360",
                     frequency="Annual", business_day="Modified Following",
-                    interpolation="Log-linear discount factors", first_pillar="2Y",
+                    interpolation="Log-linear discount factors", first_pillar="1Y",
                     model="Separate single-curve quote-implied venue curves")
+    if args.history:
+        metadata.update(source='Bloomberg BDH exact-date history', history_years=args.history_years,
+                        history_failed_dates=len(history_failures))
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     from sofr_forward_monitor import write_monitor
-    write_monitor(output / "monitor.html", forwards, rows, checks, metadata)
+    write_monitor(output / "monitor.html", forwards, rows, checks, metadata, history=history)
     print("SYNTHETIC DEMO" if args.demo else "Market quote-implied forwards: " + args.asof)
     print("Assumption: CME = LCH {:+d} * basis (bp)".format(args.basis_sign))
     print("{:<8} {:>12} {:>12} {:>17}".format("Forward", "LCH (%)", "CME (%)", "CME-LCH (bp)"))

@@ -179,7 +179,8 @@ def report(quotes,frames,status):
                  snapshot=snapshot,history=hist,quotes=q,calibration=checks)
     encoded=json.dumps(payload,allow_nan=False).replace('<','\\u003c')
     template=Path(__file__).with_name('sofr_butterfly_template.html').read_text(encoding='utf-8')
-    document=template.replace('__SNAPSHOT_JSON__',encoded)
+    from plotly.offline import get_plotlyjs
+    document=template.replace('__SNAPSHOT_JSON__',encoded).replace('__PLOTLY_JS__',get_plotlyjs())
     stable=OUTPUT/'SOFR_Butterfly_Monitor.html'
     stable.write_text(document,encoding='utf-8')
     (OUTPUT/f'SOFR_Butterfly_Monitor_{latest.replace("-","")}.html').write_text(document,encoding='utf-8')

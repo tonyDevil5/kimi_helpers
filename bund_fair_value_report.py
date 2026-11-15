@@ -47,6 +47,7 @@ from plotly.subplots import make_subplots
 # Cross-repo import of the shared backtester (same pattern as the
 # BackTestingTool strategy examples, which import from this repo).
 sys.path.append(r"D:\python\BackTestingTool")
+sys.path.append(str(Path(__file__).resolve().parent.parent / "BackTestingTool"))
 try:
     from simple_backtester import BacktestConfig, SimpleBacktester
     BACKTESTER_AVAILABLE = True
@@ -59,6 +60,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # Configuration
 # ---------------------------------------------------------------------------
 CITI_FNAME = r"D:\python\notebook\data\mbs\mbs_rv_citi.xlsx"
+if not Path(CITI_FNAME).exists():
+    CITI_FNAME = r"C:\Users\tonyy\Nutstore\1\python\notebook\data\mbs\mbs_rv_citi.xlsx"
 ESTR_SHEET = "ESTR"
 OUTPUT_DIR = Path(__file__).parent / "bund_fair_value_output"
 REPORT_TITLE = "Bund 10Y Fair Value OLS Regression Report"

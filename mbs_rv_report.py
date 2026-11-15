@@ -56,6 +56,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 _MBS_DATA_DIR = Path(r"D:\python\notebook\data\mbs")
 if not (_MBS_DATA_DIR / "mbs_rv.xlsx").exists():
     _MBS_DATA_DIR = Path.home() / "Nutstore" / "1" / "python" / "notebook" / "data" / "mbs"
+if not (_MBS_DATA_DIR / "mbs_rv.xlsx").exists():
+    _MBS_DATA_DIR = Path(r"C:\Users\tonyy\Nutstore\1\python\notebook\data\mbs")
 FNAME = str(_MBS_DATA_DIR / "mbs_rv.xlsx")
 CITI_FNAME = str(_MBS_DATA_DIR / "mbs_rv_citi.xlsx")
 

@@ -38,6 +38,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 OUTPUT_DIR = Path(__file__).parent / "euribor_basis_output"
 
 CITI_FPATH = Path(r"D:\python\notebook\data\mbs\mbs_rv_citi.xlsx")
+if not CITI_FPATH.exists():
+    CITI_FPATH = Path(r"C:\Users\tonyy\Nutstore\1\python\notebook\data\mbs\mbs_rv_citi.xlsx")
 
 TENORS = ["2y", "3y", "4y", "5y", "7y", "10y", "20y", "30y"]
 

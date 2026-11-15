@@ -45,9 +45,8 @@ def latest_sofr_forward(folder: Path) -> Path:
 def refresh_reports() -> None:
     # Sequential: several scripts share the Bloomberg session.
     jobs = [
-        (['swap_spread_report.py'], True),
-        # --latest fails on US holidays; package existing output instead of aborting.
-        (['sofr_forward_curve.py', '--latest'], False),
+        # Persistent history rolls nonbusiness valuation dates back automatically.
+        (['sofr_forward_curve.py', '--history'], True),
         (['sofr_butterfly_monitor.py'], True),
         (['eur_forward_basis_monitor.py'], True),
         (['estr_euribor_monitor.py'], True),
@@ -64,18 +63,35 @@ def refresh_reports() -> None:
                   f'packaging existing output instead.', flush=True)
 
 
+def merged_eur_report() -> Path:
+    """One EUR monitor, retaining each source's own methodology and data dates."""
+    model_path = latest_report(ROOT / 'eur_forward_basis_output', 'EUR_Forward_Basis_Monitor_????????.html')
+    quoted_path = latest_report(ROOT / 'estr_euribor_output', 'ESTR_Euribor_Forward_Basis_????????.html')
+    model = model_path.read_text(encoding='utf-8')
+    quoted = quoted_path.read_text(encoding='utf-8')
+    section = ('<section id="quoted-estr-euribor"><h2>Workbook ESTR vs Euribor 6M forward basis</h2>'
+        '<p>Citi workbook forward-basis monitoring, including component legs, changes and '
+        'historical z-scores. These workbook spreads have their own source dates and conventions; '
+        'the QuantLib matrices above show differences between model-implied forward par fixed rates.</p>'
+        '<iframe title="Workbook ESTR versus Euribor 6M forward basis" '
+        'style="width:100%;height:1150px;border:0" srcdoc="' + html.escape(quoted, quote=True) + '"></iframe></section>')
+    if '<section id="inputs">' not in model or '</nav>' not in model:
+        raise ValueError('EUR report layout changed; cannot insert workbook monitoring section')
+    model = model.replace('</nav>', '<a href="#quoted-estr-euribor">Workbook ESTR / 6M basis</a></nav>', 1)
+    model = model.replace('<section id="inputs">', section + '<section id="inputs">', 1)
+    output = ROOT / 'eur_forward_basis_output' / 'EUR_Combined_Monitor.html'
+    output.write_text(model, encoding='utf-8')
+    return output
+
+
 def report_sources() -> list[tuple[str, str, Path]]:
     candidates = [
-        ('swap-spreads', 'Swap spreads',
-         lambda: latest_report(ROOT / 'swap_spread_output', 'SwapSpread_Report_????????.html')),
         ('sofr-forward', 'LCH/CME fwd basis',
          lambda: latest_sofr_forward(ROOT / 'sofr_forward_output')),
         ('sofr-butterfly', 'SOFR butterfly',
          lambda: latest_report(ROOT / 'sofr_butterfly_output', 'SOFR_Butterfly_Monitor*.html')),
         ('eur-forward-basis', 'EUR forward basis',
-         lambda: latest_report(ROOT / 'eur_forward_basis_output', 'EUR_Forward_Basis_Monitor_????????.html')),
-        ('estr-euribor', 'ESTR vs Euribor 6M fwd basis',
-         lambda: latest_report(ROOT / 'estr_euribor_output', 'ESTR_Euribor_Forward_Basis_????????.html')),
+         merged_eur_report),
         ('estr-microstructure', 'ESTR microstructure',
          lambda: latest_report(ROOT / 'estr_microstructure_output', 'ESTR_Microstructure_Monitor_????????.html')),
         ('ccp-basis', 'Euribor/SOFR/TONAR CCP basis',
