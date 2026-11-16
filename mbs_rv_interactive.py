@@ -1219,11 +1219,133 @@ def _try_view(b: _ReportBuilder, title: str, section: str, kind: str, *args, **k
             b.add_table(title, section, *args, **kwargs)
         elif kind == "dropdown":
             b.add_dropdown(title, section, *args, **kwargs)
+        elif kind == "html":
+            b.add_html(title, section, *args, **kwargs)
     except Exception as exc:
         print(f"Interactive view '{title}' skipped: {exc}")
 
 
 _MOM_GRADIENT_COLS = ["chg_20d", "chg_60d", "mom_20d", "mom_60d"]
+
+
+# ---------------------------------------------------------------------------
+# Custom fly combo (client-side a*FlyA + b*FlyB; use negative b for a spread)
+# ---------------------------------------------------------------------------
+def _custom_fly_combo_body(fly_data: pd.DataFrame) -> str:
+    """Embed fly levels as JSON and render an interactive a*FlyA + b*FlyB tool."""
+    dates = _xs(fly_data.index)
+    labels = [
+        f"{agency} {center:g}"
+        for agency in rv.STRUCTURE_AGENCIES
+        for center in rv.COUPON_FLY_CENTERS
+    ]
+    series = {}
+    for agency in rv.STRUCTURE_AGENCIES:
+        for center in rv.COUPON_FLY_CENTERS:
+            key = f"{agency.lower()}_{center:g}_fly_level_32nds"
+            series[f"{agency} {center:g}"] = [
+                None if pd.isna(v) else round(float(v), 4) for v in fly_data[key]
+            ]
+    import json as _json
+    payload = _json.dumps({"dates": dates, "series": series}, separators=(",", ":"))
+    options = "".join(
+        f'<option value="{html.escape(lb)}"'
+        + (' selected' if lb == "FN 3.5" else "")
+        + f">{html.escape(lb)} fly</option>"
+        for lb in labels
+    )
+    options_b = options.replace('value="FN 3.5" selected', 'value="FN 3.5"').replace(
+        'value="FN 3"', 'value="FN 3" selected', 1
+    )
+    return f"""
+<p class="view-subtitle">Combo = a &times; FlyA &minus; b &times; FlyB, computed in the browser from three-price fly levels
+(2 &times; center &minus; lower &minus; upper), all in 32nds.</p>
+<script type="application/json" id="flycombo-data">{payload}</script>
+<div class="flycombo-controls">
+<label>Fly A <select id="flycombo-selA">{options}</select></label>
+<label>a <input id="flycombo-multA" type="number" step="0.1" value="1"></label>
+<label>Fly B <select id="flycombo-selB">{options_b}</select></label>
+<label>b <input id="flycombo-multB" type="number" step="0.1" value="1"></label>
+<span class="flycombo-tabs">
+<button type="button" id="flycombo-tabCombo" class="flycombo-tab active">Combo</button>
+<button type="button" id="flycombo-tabLegs" class="flycombo-tab">Fly A &amp; Fly B</button>
+</span>
+</div>
+<div id="flycombo-chart" class="chart"></div>
+<div id="flycombo-legs" class="chart" style="display:none"></div>
+<div id="flycombo-stats" class="flycombo-stats"></div>
+<script>
+(function(){{
+const DATA=JSON.parse(document.getElementById('flycombo-data').textContent);
+const dates=DATA.dates,S=DATA.series,n=dates.length;
+const selA=document.getElementById('flycombo-selA'),selB=document.getElementById('flycombo-selB');
+const mA=document.getElementById('flycombo-multA'),mB=document.getElementById('flycombo-multB');
+const chartEl=document.getElementById('flycombo-chart'),legsEl=document.getElementById('flycombo-legs');
+const statsEl=document.getElementById('flycombo-stats');
+const tabC=document.getElementById('flycombo-tabCombo'),tabL=document.getElementById('flycombo-tabLegs');
+function mult(el){{const v=parseFloat(el.value);return Number.isFinite(v)?v:1;}}
+function comboSeries(){{
+const a=mult(mA),b=mult(mB),fa=S[selA.value],fb=S[selB.value];
+const x=[],y=[];
+for(let i=0;i<n;i++){{const va=fa[i],vb=fb[i];if(va==null||vb==null)continue;x.push(dates[i]);y.push(a*va+b*vb);}}
+return {{x:x,y:y,a:a,b:b}};
+}}
+function fmt(v,d){{return (v>=0?'+':'')+v.toFixed(d===undefined?2:d);}}
+function stats(vals){{
+const m=vals.length,latest=vals[m-1];
+function chg(k){{return m>k?latest-vals[m-1-k]:null;}}
+function zscore(arr){{const n=arr.length;if(n<2)return null;const mu=arr.reduce((s,v)=>s+v,0)/n;
+const sd=Math.sqrt(arr.reduce((s,v)=>s+(v-mu)*(v-mu),0)/(n-1));return sd>0?(arr[n-1]-mu)/sd:null;}}
+const z=zscore(vals.slice(Math.max(0,m-250)));
+const zAll=zscore(vals);
+let t='Latest: <b>'+latest.toFixed(2)+'</b> (32nds)';
+for(const k of [1,5,20]){{const c=chg(k);if(c!=null)t+=' &nbsp;|&nbsp; '+k+'d: '+fmt(c);}}
+if(z!=null)t+=' &nbsp;|&nbsp; 250d z: '+fmt(z);
+if(zAll!=null)t+=' &nbsp;|&nbsp; full-sample z: '+fmt(zAll);
+t+=' &nbsp;|&nbsp; N = '+m.toLocaleString()+' obs';
+return t;
+}}
+function update(){{
+const c=comboSeries();
+if(c.x.length===0){{statsEl.textContent='No overlapping observations for this pair.';return;}}
+const comboLabel=c.a.toFixed(2)+' &times; '+selA.value+' fly + '+c.b.toFixed(2)+' &times; '+selB.value+' fly';
+const latest=c.y[c.y.length-1];
+Plotly.react(chartEl,[{{
+x:c.x,y:c.y,mode:'lines',name:comboLabel.replace(/&times;/g,'x')+': '+latest.toFixed(2),
+line:{{color:'#174a6e',width:1.5}}
+}}],{{
+template:'plotly_white',height:560,margin:{{l:60,r:40,t:60,b:50}},
+title:{{text:'Custom Fly Combo: '+comboLabel+' (32nds)',x:0.02,xanchor:'left',font:{{size:15}}}},
+yaxis:{{title:'Combo (32nds)',zeroline:true,zerolinecolor:'#64748b',zerolinewidth:1}},
+showlegend:true,legend:{{font:{{size:11}}}}
+}},{{responsive:true,displaylogo:false}});
+statsEl.innerHTML=stats(c.y);
+if(legsEl.style.display!=='none')updateLegs(c);
+}}
+function updateLegs(c){{
+const fa=S[selA.value],fb=S[selB.value];
+function leg(f){{const x=[],y=[];for(let i=0;i<n;i++){{if(f[i]!=null){{x.push(dates[i]);y.push(f[i]);}}}}return {{x:x,y:y}};}}
+const la=leg(fa),lb=leg(fb);
+Plotly.react(legsEl,[
+{{x:la.x,y:la.y,mode:'lines',name:c.a.toFixed(2)+' x '+selA.value+' fly: '+(c.a*la.y[la.y.length-1]).toFixed(2),line:{{color:'#2563eb',width:1.4}}}},
+{{x:lb.x,y:lb.y,mode:'lines',name:c.b.toFixed(2)+' x '+selB.value+' fly: '+(c.b*lb.y[lb.y.length-1]).toFixed(2),line:{{color:'#dc2626',width:1.4}}}}
+],{{
+template:'plotly_white',height:560,margin:{{l:60,r:40,t:60,b:50}},
+title:{{text:'Combo legs (multiplied): a x FlyA and b x FlyB (32nds)',x:0.02,xanchor:'left',font:{{size:15}}}},
+yaxis:{{title:'32nds',zeroline:true,zerolinecolor:'#64748b',zerolinewidth:1}},
+showlegend:true,legend:{{font:{{size:11}}}}
+}},{{responsive:true,displaylogo:false}});
+}}
+tabC.addEventListener('click',()=>{{chartEl.style.display='';legsEl.style.display='none';tabC.classList.add('active');tabL.classList.remove('active');update();}});
+tabL.addEventListener('click',()=>{{chartEl.style.display='none';legsEl.style.display='';tabL.classList.add('active');tabC.classList.remove('active');update();}});
+[selA,selB,mA,mB].forEach(el=>{{el.addEventListener('change',update);el.addEventListener('input',update);}});
+update();
+}})();
+</script>
+"""
+
+
+
 
 
 def _add_momentum_pages(
@@ -1477,6 +1599,11 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
         "slope x sqrt(window) / daily realized vol  |  Upward = fly level "
         "rising; Downward = fly level falling",
         rename_latest=True,
+    )
+    _try_view(
+        b, "Custom Fly Combo (a×FlyA + b×FlyB)", "Coupon structures", "html",
+        _custom_fly_combo_body(payloads["coupon_fly_data"]),
+        search_extra="custom fly combo multiplier interactive",
     )
 
     _build_cc_pages(b, payloads)
@@ -1812,6 +1939,13 @@ main{margin-left:290px;padding:22px;max-width:1700px}.topbar{display:flex;justif
 .data-table tbody tr:nth-child(even){background:#f0f0f0}
 .table-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 9px}.table-tools input{min-width:240px;flex:1;max-width:480px;padding:7px 9px;border:1px solid #b6c5cf;border-radius:6px}.table-tools button{border:1px solid #b6c5cf;background:#fff;padding:7px 10px;border-radius:6px;cursor:pointer}.table-tools button:hover{background:#eef2f6}.table-count{font-size:12px;color:var(--muted);margin-left:auto}
 .dropdown-bar{margin:2px 0 12px;font-size:13px}
+.flycombo-controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:13px;margin:2px 0 12px}
+.flycombo-controls select,.flycombo-controls input{padding:6px 8px;border:1px solid #b6c5cf;border-radius:6px;font-size:13px;background:#fff}
+.flycombo-controls input{width:80px}
+.flycombo-tabs{margin-left:auto}
+.flycombo-tab{border:1px solid #b6c5cf;background:#fff;padding:7px 10px;border-radius:6px;cursor:pointer;font-size:12px}
+.flycombo-tab.active{background:#174a6e;color:#fff;border-color:#174a6e}
+.flycombo-stats{font-size:13px;color:var(--ink);margin:8px 0 2px;padding:7px 10px;background:#f1f5f9;border:1px solid var(--line);border-radius:6px}
 .dropdown-bar select{padding:6px 8px;border:1px solid #b6c5cf;border-radius:6px;font-size:13px;min-width:240px;background:#fff}
 .overview h1{font-size:24px;margin:8px 0 4px;text-align:center}
 .overview .ov-sub{text-align:center;color:var(--muted);margin:0 0 18px}
