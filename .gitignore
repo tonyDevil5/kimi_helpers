@@ -58,3 +58,8 @@ Thumbs.db
 /mbs_origination_output/
 
 /mbs_origination_signal_output/
+/fx_usdhkd_output/
+/fx_usdcnh_output/
+/fx_usdjpy_output/
+/fx_eurusd_output/
+/fx_combined_output/
