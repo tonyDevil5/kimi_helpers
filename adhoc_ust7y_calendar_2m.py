@@ -69,9 +69,15 @@ def main():
     histogram=fig.to_html(full_html=False,include_plotlyjs=False,config=dict(responsive=True,displaylogo=False))
     fig=go.Figure(go.Bar(x=pd.to_datetime(primary.end_date),y=moves,
         customdata=primary[['start_date','end_date']].astype(str).to_numpy(),
-        marker_color=np.where(moves>=0,'#c36c27','#216a97'),
+        marker_color=np.where(moves>=0,'#c36c27','#216a97'),name='2M change (bp)',
         hovertemplate='%{customdata[0]} → %{customdata[1]}<br>%{y:+.2f} bp<extra></extra>'))
-    fig.update_layout(template='plotly_white',height=500,title='Completed non-overlapping periods — Jan-start schedule',yaxis_title='Yield change (bp)')
+    fig.add_trace(go.Scatter(x=s.index,y=s.values,mode='lines',name='7Y yield (%, right axis)',
+        line=dict(color='#173e56',width=1.2),yaxis='y2',
+        hovertemplate='%{x|%Y-%m-%d}: %{y:.3f}%<extra></extra>'))
+    fig.update_layout(template='plotly_white',height=500,title='Completed non-overlapping periods — Jan-start schedule',
+        yaxis_title='Yield change (bp)',
+        yaxis2=dict(title='7Y yield (%)',overlaying='y',side='right',showgrid=False),
+        legend=dict(orientation='h',y=1.08))
     history=fig.to_html(full_html=False,include_plotlyjs=False)
     first,last=primary.iloc[0],primary.iloc[-1]
     starts=month_starts(s)
