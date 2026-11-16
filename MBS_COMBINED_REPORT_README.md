@@ -2,15 +2,17 @@
 
 Ask: **Run the latest combined MBS report.**
 
-Open `mbs_combined_output/MBS_Combined_Report.html`. Its five section links are:
+Open `mbs_combined_output/MBS_Combined_Report.html`. Its seven section links are:
 
 - `#mbs-rv`: MBS relative-value monitor.
+- `#mbs-perf-regression`: MBS coupon performance regression.
+- `#mbs-origination`: Citi origination versus JPM coupon performance (10/20/30d), with daily and historical charts.
 - `#tba-strategies`: TBA OLS fair-value and level-fade strategy analysis.
 - `#jpm-mean-reversion`: JPM performance mean reversion, including coupon and structure groups.
 - `#mbs-credit`: MBS versus credit basis analysis and backtest.
 - `#fair-value-120`: 120-observation UST/FN fair-value backtest, including its CTA/TBA comparison and strategy correlations.
 
-Refresh all five analyses and build the combined HTML in mercury_env:
+Refresh all seven analyses and build the combined HTML in mercury_env:
 
 ```powershell
 python mbs_combined_report.py
@@ -44,3 +46,6 @@ copy with the installed local Plotly bundle; original standalone files remain
 intact. Each section retains its own document, controls, CSS and JavaScript.
 Reports load on first selection and retain state between visits. The underlying
 HTML-packaging implementation is shared with the combined Treasury report.
+
+
+Origination trading-signal research is standalone and is not refreshed or embedded in this combined report.

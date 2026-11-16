@@ -40,16 +40,18 @@ class CombinedMBSReportTests(unittest.TestCase):
             self.assertTrue(doc['plotly_inlined'])
             self.assertEqual(path.read_text(encoding='utf-8'),original)
 
-    def test_refresh_five_jobs_updates_caches_and_uses_current_monitor_imports(self):
+    def test_refresh_seven_jobs_updates_caches_and_uses_current_monitor_imports(self):
         with patch.object(mbs.subprocess,'run') as run:
             mbs.refresh_reports(Path('BackTestingTool'))
         calls=run.call_args_list
-        self.assertEqual(len(calls),5)
+        self.assertEqual(len(calls),7)
         self.assertEqual(calls[0].args[0][-2:],['--format','interactive'])
-        self.assertIn('--update',calls[1].args[0])
-        self.assertIn('jpm_coupon_mean_reversion.py',calls[2].args[0][-1])
+        self.assertEqual(calls[1].args[0][-1],'mbs_perf_regression.py')
+        self.assertEqual(calls[2].args[0][-1],'mbs_origination_analysis.py')
         self.assertIn('--update',calls[3].args[0])
-        self.assertEqual(calls[4].args[0][-2:],['strategy_example/fair_value_120_backtest.py','--update'])
+        self.assertIn('jpm_coupon_mean_reversion.py',calls[4].args[0][-1])
+        self.assertIn('--update',calls[5].args[0])
+        self.assertEqual(calls[6].args[0][-2:],['strategy_example/fair_value_120_backtest.py','--update'])
         for call in calls:
             self.assertTrue(call.kwargs['check'])
             self.assertTrue(call.kwargs['env']['PYTHONPATH'].startswith(str(mbs.ROOT)))
@@ -81,9 +83,10 @@ class CombinedMBSReportTests(unittest.TestCase):
                 subprocess.run([node,'--check',str(script_path)],check=True,capture_output=True)
 
     def test_source_manifest_includes_fair_value_120(self):
-        with patch.object(mbs,'latest_mbs_rv',return_value=Path('mbs.html')):
+        with patch.object(mbs,'latest_mbs_rv',return_value=Path('mbs.html')), patch.object(mbs,'latest_perf_regression',return_value=Path('regression.html')), patch.object(mbs,'latest_report',return_value=Path('origination.html')):
             sources=mbs.report_sources(Path('BackTestingTool'))
-        self.assertEqual(len(sources),5)
+        self.assertEqual(len(sources),7)
+        self.assertIn('mbs-origination',[s[0] for s in sources])
         self.assertEqual(sources[-1][0],'fair-value-120')
         self.assertEqual(sources[-1][2],Path('BackTestingTool/strategy_example/fair_value_120_output/fair_value_120_backtest.html'))
 

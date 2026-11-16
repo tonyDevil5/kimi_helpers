@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 
-from ust_combined_report import build_report
+from ust_combined_report import build_report, latest_report
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_BACKTEST_ROOT = ROOT.parent/'BackTestingTool'
@@ -46,6 +46,7 @@ def report_sources(backtest_root: Path):
     return [
         ('mbs-rv', 'MBS RV', latest_mbs_rv(ROOT/'mbs_rv_output')),
         ('mbs-perf-regression', 'MBS performance regression', latest_perf_regression(ROOT/'mbs_perf_regression_output')),
+        ('mbs-origination', 'MBS origination', latest_report(ROOT/'mbs_origination_output', 'MBS_Origination*.html')),
         ('tba-strategies', 'TBA strategies', examples/'tba_strategy_output'/'tba_strategy_analysis.html'),
         ('jpm-mean-reversion', 'JPM performance mean reversion', examples/'jpm_coupon_mean_reversion_output'/'jpm_coupon_mean_reversion.html'),
         ('mbs-credit', 'MBS vs credit', examples/'mbs_credit_output'/'mbs_credit_basis_report_interactive.html'),
@@ -61,6 +62,7 @@ def refresh_reports(backtest_root: Path):
     jobs = [
         (ROOT, ['mbs_rv_report.py', '--format', 'interactive']),
         (ROOT, ['mbs_perf_regression.py']),
+        (ROOT, ['mbs_origination_analysis.py']),
         (backtest_root, ['strategy_example/tba_strategy_backtest.py', '--update']),
         (backtest_root, ['strategy_example/jpm_coupon_mean_reversion.py']),
         (backtest_root, ['strategy_example/mbs_credit_basis_backtest.py', '--update']),
