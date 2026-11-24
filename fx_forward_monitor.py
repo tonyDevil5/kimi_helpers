@@ -3,14 +3,14 @@ FX Forward Monitor (multi-pair)
 ===============================
 Interactive monitor of an FX pair's forward curve across monthly tenors
 (1M..12M), built from Bloomberg spot and forward points. Supported pairs:
-USD/HKD, USD/CNH, USD/JPY and EUR/USD (quoted as EURUSD per market
+USD/HKD, USD/CNH, USD/JPY, USD/SGD and EUR/USD (quoted as EURUSD per market
 convention).
 
 Data (probed live on Bloomberg; all confirmed working):
-    Spot:            USDHKD Curncy / USDCNH Curncy / USDJPY Curncy / EURUSD Curncy
+    Spot:            USDHKD / USDCNH / USDJPY / USDSGD / EURUSD Curncy
     Forward points:  {CCY}{n}M BGN Curncy (PX_LAST), n = 1..12
-                     ({CCY} = HKD / CNH / JPY / EUR; "12M", not "1Y").
-    Pip scale:       HKD 0.0001, CNH 0.0001, JPY 0.01, EUR 0.0001
+                     ({CCY} = HKD / CNH / JPY / SGD / EUR; "12M", not "1Y").
+    Pip scale:       HKD 0.0001, CNH 0.0001, JPY 0.01, SGD 0.0001, EUR 0.0001
                      (outright = spot + points * pip scale).
 
 History is cached per pair in fx_<pair>_output/history/<pair>_history.csv;
@@ -26,7 +26,9 @@ Report content:
     - History chart per tenor (dropdown): forward points with rolling 250d
       mean +/-1/2 sigma bands; Spot shows the spot outright.
     - "Forward Curve - Spreads" section: 1M leg (2M-1M..12M-11M) and 3M leg
-      (4M-1M..12M-9M, including standard 6M-3M, 9M-6M, 12M-9M).
+      (4M-1M..12M-9M, including standard 6M-3M, 9M-6M, 12M-9M), with a
+      Roll-down 1M column (spread now minus the value of the spread it ages
+      into in 1M, on today's points).
     - "Forward Flies" section: 1M leg (1M2M3M..10M11M12M) and 3M leg
       (1M4M7M..6M9M12M, including standard 3M6M9M, 6M9M12M).
 
@@ -106,6 +108,8 @@ PAIRS: Dict[str, PairCfg] = {
                       1e-4, _ROOT / "fx_usdcnh_output"),
     "USDJPY": PairCfg("USDJPY", "USD/JPY", "USD", "JPY", "USDJPY Curncy", "JPY",
                       1e-2, _ROOT / "fx_usdjpy_output"),
+    "USDSGD": PairCfg("USDSGD", "USD/SGD", "USD", "SGD", "USDSGD Curncy", "SGD",
+                      1e-4, _ROOT / "fx_usdsgd_output"),
     "EURUSD": PairCfg("EURUSD", "EUR/USD", "EUR", "USD", "EURUSD Curncy", "EUR",
                       1e-4, _ROOT / "fx_eurusd_output",
                       quote_note="EUR is quoted as EURUSD per market convention "
@@ -231,6 +235,14 @@ def _vol20d(s: pd.Series) -> float:
     return float(diffs.std(ddof=1))
 
 
+def _dod(s: pd.Series) -> float:
+    """Day-over-day change of the latest observation."""
+    s = s.dropna()
+    if len(s) < 2:
+        return np.nan
+    return float(s.iloc[-1] - s.iloc[-2])
+
+
 def build_points(hist: pd.DataFrame, cfg: PairCfg) -> pd.DataFrame:
     """DataFrame of forward points in pips (1M..12M columns), fully populated rows."""
     out = pd.DataFrame(index=hist.index)
@@ -249,6 +261,7 @@ def build_stats(outrights: pd.DataFrame, points: pd.DataFrame,
         s = outrights[label].dropna()
         row: Dict[str, float] = {
             "latest": float(s.iloc[-1]),
+            "outright_dod": _dod(s),
             "min_250d": np.nan,
             "median_250d": np.nan,
             "max_250d": np.nan,
@@ -256,6 +269,7 @@ def build_stats(outrights: pd.DataFrame, points: pd.DataFrame,
             "z_250d": np.nan,
             "obs": len(s),
             "points": np.nan,
+            "points_dod": np.nan,
             "carry_ann": np.nan,
             "vol_20d": np.nan,
         }
@@ -265,6 +279,7 @@ def build_stats(outrights: pd.DataFrame, points: pd.DataFrame,
             recent = pts.tail(Z_WINDOW)
             row.update({
                 "points": float(pts.iloc[-1]),
+                "points_dod": _dod(pts),
                 "min_250d": float(recent.min()),
                 "median_250d": float(recent.median()),
                 "max_250d": float(recent.max()),
@@ -341,9 +356,11 @@ def fig_forward_curve(points: pd.DataFrame, cfg: PairCfg) -> go.Figure:
 
 
 def fig_history(label: str, s: pd.Series, unit: str, fmt: str,
-                what: Optional[str] = None, pair: str = "") -> go.Figure:
+                what: Optional[str] = None, pair: str = "",
+                spot: Optional[pd.Series] = None) -> go.Figure:
     """History of a series (points in pips, or spot outright) with rolling
-    250d mean +/-1/2 sigma bands."""
+    250d mean +/-1/2 sigma bands. If spot is given, it is overlaid as a faint
+    gray line on a secondary (right) y-axis in outright units."""
     s = s.dropna()
     mean = s.rolling(window=Z_WINDOW, min_periods=MIN_OBS).mean()
     std = s.rolling(window=Z_WINDOW, min_periods=MIN_OBS).std(ddof=1)
@@ -380,15 +397,25 @@ def fig_history(label: str, s: pd.Series, unit: str, fmt: str,
         x=_xs(s.index[-1:]), y=[float(s.iloc[-1])], mode="markers",
         marker=dict(color="#dc2626", size=8), showlegend=False, hoverinfo="skip",
     ))
+    if spot is not None:
+        sp = spot.dropna()
+        fig.add_trace(go.Scatter(
+            x=_xs(sp.index), y=_ys(sp), mode="lines", name="Spot (right)",
+            line=dict(color="#9ca3af", width=1.0), opacity=0.6, yaxis="y2",
+        ))
+        fig.update_layout(yaxis2=dict(overlaying="y", side="right",
+                                      showgrid=False, title_text=f"{pair} spot"))
     fig.update_yaxes(title_text=unit)
     if what is None:
         what = "Spot Outright" if label == "Spot" else f"{label} Forward Points"
+    spot_note = "  |  gray line = spot (right axis)" if spot is not None else ""
     _apply_layout(
         fig, f"{pair} {what} - History vs Rolling {Z_WINDOW}d Bands",
         subtitle=f"Latest: {float(s.iloc[-1]):{fmt}}  |  "
                  f"σ = {sd_now:{fmt}}  |  "
                  f"+1σ/−1σ = {m_now + sd_now:{fmt}} / {m_now - sd_now:{fmt}}  |  "
-                 f"+2σ/−2σ = {m_now + 2 * sd_now:{fmt}} / {m_now - 2 * sd_now:{fmt}}  |  "
+                 f"+2σ/−2σ = {m_now + 2 * sd_now:{fmt}} / {m_now - 2 * sd_now:{fmt}}"
+                 f"{spot_note}  |  "
                  f"{s.index[0].date()} to {s.index[-1].date()}",
     )
     return fig
@@ -415,6 +442,18 @@ def _fmt(x: float, fmt: str = "{:.4f}", na: str = "n/a") -> str:
     return fmt.format(x) if pd.notna(x) else na
 
 
+def _with_dod(value: float, dod: float, fmt: str, dod_fmt: str, na: str = "—") -> str:
+    """Leading value plus a small colored day-over-day change in parentheses.
+    Returns raw HTML (the leading numeric text stays first so the table
+    sorter's leading-number parse keeps numeric sort)."""
+    base = html.escape(_fmt(value, fmt, na))
+    if pd.isna(dod):
+        return base
+    color = "#059669" if dod > 0 else "#dc2626" if dod < 0 else "#64748b"
+    return (f'{base} <span style="color:{color};font-size:10px">'
+            f'({dod:+{dod_fmt}})</span>')
+
+
 def _summary_table_html(stats: Dict[str, Dict[str, float]]) -> str:
     cols = ["Tenor", "Outright", "Fwd Points (pips)", "Ann. Carry (%, fwd buyer)",
             "Vol 20d (pips)",
@@ -427,16 +466,16 @@ def _summary_table_html(stats: Dict[str, Dict[str, float]]) -> str:
     for label in labels:
         row = stats[label]
         values = {
-            "Tenor": label,
-            "Outright": _fmt(row["latest"]),
-            "Fwd Points (pips)": _fmt(row["points"], "{:+.1f}", "—"),
-            "Ann. Carry (%, fwd buyer)": _fmt(row["carry_ann"], "{:+.2f}", "—"),
-            "Vol 20d (pips)": _fmt(row["vol_20d"], "{:.1f}", "—"),
-            f"Min {Z_WINDOW}d (pips)": _fmt(row["min_250d"], "{:+.1f}", "—"),
-            f"Median {Z_WINDOW}d (pips)": _fmt(row["median_250d"], "{:+.1f}", "—"),
-            f"Max {Z_WINDOW}d (pips)": _fmt(row["max_250d"], "{:+.1f}", "—"),
-            "Pctile Rank (%)": _fmt(row["pct_rank"], "{:.0f}", "—"),
-            f"z{Z_WINDOW}d": _fmt(row["z_250d"], "{:+.2f}", "—"),
+            "Tenor": html.escape(label),
+            "Outright": _with_dod(row["latest"], row["outright_dod"], "{:.4f}", ".4f"),
+            "Fwd Points (pips)": _with_dod(row["points"], row["points_dod"], "{:+.1f}", ".1f"),
+            "Ann. Carry (%, fwd buyer)": html.escape(_fmt(row["carry_ann"], "{:+.2f}", "—")),
+            "Vol 20d (pips)": html.escape(_fmt(row["vol_20d"], "{:.1f}", "—")),
+            f"Min {Z_WINDOW}d (pips)": html.escape(_fmt(row["min_250d"], "{:+.1f}", "—")),
+            f"Median {Z_WINDOW}d (pips)": html.escape(_fmt(row["median_250d"], "{:+.1f}", "—")),
+            f"Max {Z_WINDOW}d (pips)": html.escape(_fmt(row["max_250d"], "{:+.1f}", "—")),
+            "Pctile Rank (%)": html.escape(_fmt(row["pct_rank"], "{:.0f}", "—")),
+            f"z{Z_WINDOW}d": html.escape(_fmt(row["z_250d"], "{:+.2f}", "—")),
         }
         parts.append("<tr>")
         for c in cols:
@@ -447,7 +486,7 @@ def _summary_table_html(stats: Dict[str, Dict[str, float]]) -> str:
                     style = f' style="background:{color}"'
             elif c == "Tenor":
                 style = ' style="font-weight:bold"'
-            parts.append(f"<td{style}>{html.escape(values[c])}</td>")
+            parts.append(f"<td{style}>{values[c]}</td>")
         parts.append("</tr>")
     parts.append("</tbody></table></div>")
     return "".join(parts)
@@ -476,6 +515,21 @@ CURVE_LEG = {
     **{f"{n + 1}M-{n}M": "1M" for n in range(1, 12)},
     **{f"{n + 3}M-{n}M": "3M" for n in range(1, 10)},
 }
+
+
+def curve_roll_map(curve_structs: "Dict[str, pd.Series]",
+                   points: pd.DataFrame) -> Dict[str, float]:
+    """1M roll-down per spread aM-bM: in one month it ages into
+    (a-1)M-(b-1)M, so roll = spread(aM-bM) - spread((a-1)M-(b-1)M) using
+    today's points (0M = spot with 0 points, so 2M-1M rolls against
+    points(1M) - 0). Positive = earns roll for a long-spread position."""
+    cur = {n: float(points[f"{n}M"].dropna().iloc[-1]) for n in TENOR_MONTHS}
+    rolls: Dict[str, float] = {}
+    for name in curve_structs:
+        a, b = (int(x) for x in name.rstrip("M").split("M-"))
+        shifted = cur.get(a - 1, 0.0) - cur.get(b - 1, 0.0)
+        rolls[name] = (cur[a] - cur[b]) - shifted
+    return rolls
 
 
 def build_fly_structures(points: pd.DataFrame) -> "Dict[str, pd.Series]":
@@ -508,6 +562,7 @@ def build_structure_stats(structs: "Dict[str, pd.Series]") -> Dict[str, Dict[str
         recent = s.tail(Z_WINDOW)
         stats[name] = {
             "latest": float(s.iloc[-1]),
+            "dod": _dod(s),
             "min_250d": float(recent.min()),
             "median_250d": float(recent.median()),
             "max_250d": float(recent.max()),
@@ -520,26 +575,32 @@ def build_structure_stats(structs: "Dict[str, pd.Series]") -> Dict[str, Dict[str
 
 def _structure_table_html(structs: "Dict[str, pd.Series]",
                           stats: Dict[str, Dict[str, float]],
-                          leg_map: Optional[Dict[str, str]] = None) -> str:
+                          leg_map: Optional[Dict[str, str]] = None,
+                          roll_map: Optional[Dict[str, float]] = None) -> str:
     cols = (["Structure", "Leg"] if leg_map else ["Structure"]) + \
-           ["Current (pips)", "Vol 20d (pips)",
-            f"Min {Z_WINDOW}d (pips)", f"Median {Z_WINDOW}d (pips)",
+           ["Current (pips)", "Vol 20d (pips)"] + \
+           (["Roll-down 1M (pips)"] if roll_map is not None else []) + \
+           [f"Min {Z_WINDOW}d (pips)", f"Median {Z_WINDOW}d (pips)",
             f"Max {Z_WINDOW}d (pips)", "Pctile Rank (%)", f"z{Z_WINDOW}d"]
+    max_abs_roll = max((abs(v) for v in roll_map.values() if pd.notna(v)),
+                       default=0.0) if roll_map is not None else 0.0
     parts = ['<div class="table-wrap"><table class="data-table sortable-table"><thead><tr>']
     parts += [f"<th>{html.escape(c)}</th>" for c in cols]
     parts.append("</tr></thead><tbody>")
     for name in structs:
         row = stats[name]
         values = {
-            "Structure": name,
-            "Leg": leg_map[name] if leg_map else "",
-            "Current (pips)": _fmt(row["latest"], "{:+.1f}"),
-            "Vol 20d (pips)": _fmt(row["vol_20d"], "{:.1f}", "—"),
-            f"Min {Z_WINDOW}d (pips)": _fmt(row["min_250d"], "{:+.1f}"),
-            f"Median {Z_WINDOW}d (pips)": _fmt(row["median_250d"], "{:+.1f}"),
-            f"Max {Z_WINDOW}d (pips)": _fmt(row["max_250d"], "{:+.1f}"),
-            "Pctile Rank (%)": _fmt(row["pct_rank"], "{:.0f}"),
-            f"z{Z_WINDOW}d": _fmt(row["z_250d"], "{:+.2f}"),
+            "Structure": html.escape(name),
+            "Leg": html.escape(leg_map[name]) if leg_map else "",
+            "Current (pips)": _with_dod(row["latest"], row["dod"], "{:+.1f}", ".1f"),
+            "Vol 20d (pips)": html.escape(_fmt(row["vol_20d"], "{:.1f}", "—")),
+            "Roll-down 1M (pips)": html.escape(
+                _fmt(roll_map[name], "{:+.1f}", "—") if roll_map is not None else ""),
+            f"Min {Z_WINDOW}d (pips)": html.escape(_fmt(row["min_250d"], "{:+.1f}")),
+            f"Median {Z_WINDOW}d (pips)": html.escape(_fmt(row["median_250d"], "{:+.1f}")),
+            f"Max {Z_WINDOW}d (pips)": html.escape(_fmt(row["max_250d"], "{:+.1f}")),
+            "Pctile Rank (%)": html.escape(_fmt(row["pct_rank"], "{:.0f}")),
+            f"z{Z_WINDOW}d": html.escape(_fmt(row["z_250d"], "{:+.2f}")),
         }
         parts.append("<tr>")
         for c in cols:
@@ -548,9 +609,18 @@ def _structure_table_html(structs: "Dict[str, pd.Series]",
                 color = _z_color(row["z_250d"])
                 if color:
                     style = f' style="background:{color}"'
+            elif c == "Roll-down 1M (pips)" and roll_map is not None:
+                roll = roll_map[name]
+                if pd.notna(roll) and max_abs_roll > 0:
+                    t = min(1.0, abs(roll) / max_abs_roll)
+                    if roll >= 0:
+                        r, g, b = int(255 - 150 * t), 255, int(255 - 150 * t)
+                    else:
+                        r, g, b = 255, int(255 - 150 * t), int(255 - 150 * t)
+                    style = f' style="background:#{r:02x}{g:02x}{b:02x}"'
             elif c == "Structure":
                 style = ' style="font-weight:bold"'
-            parts.append(f"<td{style}>{html.escape(values[c])}</td>")
+            parts.append(f"<td{style}>{values[c]}</td>")
         parts.append("</tr>")
     parts.append("</tbody></table></div>")
     return "".join(parts)
@@ -588,7 +658,7 @@ box-shadow:0 3px 12px rgba(15,23,42,.06);padding:16px 18px;margin-bottom:20px}
 @media print{.header{position:static}.section{break-after:page}}
 """
 
-_JS = """
+_JS = r"""
 const FIGS={};
 document.querySelectorAll('script.plotly-fig').forEach(s=>{FIGS[s.dataset.target]=s.textContent;});
 function renderChart(id){const el=document.getElementById(id);if(!el||el.dataset.rendered||!FIGS[id])return;const f=JSON.parse(FIGS[id]);el.dataset.rendered="1";Plotly.newPlot(el,f.data,f.layout,{responsive:true,displaylogo:false});}
@@ -603,7 +673,7 @@ sel.addEventListener('change',()=>showStruct(sel.dataset.group,sel.value));
 showStruct(sel.dataset.group,sel.value);
 });
 document.querySelectorAll('.chart-always').forEach(el=>renderChart(el.id));
-function cellValue(cell){const text=cell.textContent.trim().replace(/,/g,'');if(text===''||text==='—'||text==='N.A.'||text==='n/a')return {blank:true,num:false,value:''};const n=Number(text.replace(/(%|bp)$/,''));return Number.isFinite(n)?{blank:false,num:true,value:n}:{blank:false,num:false,value:text.toLowerCase()};}
+function cellValue(cell){const text=cell.textContent.trim().replace(/,/g,'');if(text===''||text==='—'||text==='N.A.'||text==='n/a')return {blank:true,num:false,value:''};const lead=text.match(/^[-+]?\d*\.?\d+/);if(lead)return {blank:false,num:true,value:Number(lead[0])};const n=Number(text.replace(/(%|bp)$/,''));return Number.isFinite(n)?{blank:false,num:true,value:n}:{blank:false,num:false,value:text.toLowerCase()};}
 function csvCell(value){return '"'+value.replace(/"/g,'""')+'"';}
 document.querySelectorAll('.sortable-table').forEach((table)=>{
 const wrap=table.closest('.table-wrap');if(!wrap)return;const rows=[...table.tBodies[0].rows];const tools=document.createElement('div');tools.className='table-tools';
@@ -685,6 +755,7 @@ def build_html(cfg: PairCfg, outrights: pd.DataFrame, points: pd.DataFrame,
             fig = fig_history(
                 name, series, "pips", "+.1f",
                 what=f"{title_prefix} {name}", pair=cfg.pair,
+                spot=outrights["Spot"],
             )
             block_parts.append(
                 f'<div class="struct-block" data-group="{group}" data-struct="{html.escape(name)}"{hidden}>'
@@ -729,16 +800,22 @@ def build_html(cfg: PairCfg, outrights: pd.DataFrame, points: pd.DataFrame,
 
     # Curve spreads section
     curve_stats = build_structure_stats(curve_structs)
+    curve_rolls = curve_roll_map(curve_structs, points)
     spread_section = (
         '<section class="section"><h2>Forward Curve — Spreads (points, pips)</h2>'
-        + _structure_table_html(curve_structs, curve_stats, leg_map=CURVE_LEG)
+        + _structure_table_html(curve_structs, curve_stats, leg_map=CURVE_LEG,
+                                roll_map=curve_rolls)
         + _history_dropdown("curve", curve_structs, "2M-1M", "Curve Spread")
         + '<p class="note">Spread aM-bM = pts(aM) − pts(bM). A negative spread '
           "means the curve is inverted (more negative points at longer tenors). "
           "Leg \"1M\" = 11 adjacent monthly spreads (2M-1M..12M-11M); leg \"3M\" = "
           "nine 3-month-spaced spreads (4M-1M..12M-9M), which includes the "
           "standard 6M-3M, 9M-6M and 12M-9M structures. Vol 20d (pips) = std of "
-          "daily spread changes over the trailing 20 trading days.</p></section>"
+          "daily spread changes over the trailing 20 trading days. "
+          "Roll-down 1M (pips) = current spread minus today's value of the "
+          "spread it ages into in one month, aM-bM → (a−1)M-(b−1)M, computed "
+          "on today's points with 0M = spot (0 points); positive = earns roll "
+          "for a long-spread position.</p></section>"
     )
 
     # Flies section

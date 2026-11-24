@@ -1,6 +1,6 @@
-"""Build one portable, interactive FX forward report from the four pair monitors.
+"""Build one portable, interactive FX forward report from the five pair monitors.
 
-Pairs: USD/HKD, USD/CNH, USD/JPY, EUR/USD (quoted EURUSD per market convention).
+Pairs: USD/HKD, USD/CNH, USD/JPY, USD/SGD, EUR/USD (quoted EURUSD per market convention).
 Sequential refresh (pairs share the Bloomberg session); a pair that fails is
 packaged from its existing output with a warning.
 
@@ -24,6 +24,7 @@ PAIR_MONITORS = [
     ("usdhkd", "USD/HKD forwards", "fx_usdhkd_monitor.py", "fx_usdhkd_output", "USDHKD_Forward_Monitor_????????.html"),
     ("usdcnh", "USD/CNH forwards", "fx_usdcnh_monitor.py", "fx_usdcnh_output", "USDCNH_Forward_Monitor_????????.html"),
     ("usdjpy", "USD/JPY forwards", "fx_usdjpy_monitor.py", "fx_usdjpy_output", "USDJPY_Forward_Monitor_????????.html"),
+    ("usdsgd", "USD/SGD forwards", "fx_usdsgd_monitor.py", "fx_usdsgd_output", "USDSGD_Forward_Monitor_????????.html"),
     ("eurusd", "EUR/USD forwards", "fx_eurusd_monitor.py", "fx_eurusd_output", "EURUSD_Forward_Monitor_????????.html"),
 ]
 
