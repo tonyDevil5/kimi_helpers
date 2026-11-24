@@ -3,7 +3,7 @@
 body{font:14px Arial,sans-serif;background:#eef2f6;color:#172e40;margin:0}main{max-width:1400px;margin:auto;padding:24px}section,header{background:white;border:1px solid #d8e2ea;border-radius:10px;padding:22px;margin-bottom:20px}h1{margin:0 0 12px}h2{font-size:20px}p{line-height:1.6;color:#485b69}nav a{margin-right:22px;color:#17658d}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{padding:11px;text-align:right;border:1px solid #d8e2ea}th{background:#173e56;color:white}td:first-child,th:first-child{text-align:left}.matrix td:not(:first-child){cursor:pointer;font-weight:bold}.matrix td:focus{outline:3px solid #1474a3;outline-offset:-3px}.scroll{overflow:auto}button{padding:8px 14px;border:1px solid #b3c6d2;border-radius:5px;background:#f5f9fc;cursor:pointer;margin:10px 10px 0 0}#detail{background:#f0f7fc;border-left:4px solid #21749d;padding:15px;margin-top:16px;line-height:1.8}details{margin-top:20px}summary{cursor:pointer;font-weight:bold}small{color:#526878}.input-table{font-size:12px}.input-table td{padding:7px}#legend{margin:15px 0}.chip{padding:5px 12px;display:inline-block;border-radius:5px;margin-right:7px}@media(max-width:650px){main{padding:10px}section,header{padding:14px}td,th{padding:8px}}
 .matrix-pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:22px}.matrix-pair h3{font-size:15px}.matrix-pair td,.matrix-pair th{padding:8px 6px;font-size:12px}.matrix-pair th:first-child{min-width:92px}@media(max-width:1050px){.matrix-pair{grid-template-columns:1fr}}
 </style><script>__PLOTLY_JS__</script></head><body><main>
-<header><h1>EUR Forward Basis Monitor</h1><p id="asof"></p><nav><a href="#estr3m">3M − €STR</a><a href="#eur3m6m">6M − 3M</a><a href="#estr6m">6M − €STR</a><a href="#inputs">Input curves</a><a href="#method">Method</a></nav></header>
+<header><h1>EUR Forward Basis Monitor</h1><p id="asof"></p><nav><a href="#estr3m">3M − €STR</a><a href="#eur3m6m">6M − 3M</a><a href="#estr6m">6M − €STR</a><a href="#fixings">Fixings</a><a href="#inputs">Input curves</a><a href="#method">Method</a></nav></header>
 <section><p>Rows = years from T+2 spot to swap start. Columns = swap length. For example, <b>5Y10Y</b> starts in five years and runs for ten years. All matrix values are <b>basis points</b>. Select a cell for the three forward rates and dates.</p><div id="legend"><span class="chip" style="background:#dbeafe">Negative</span><span class="chip" style="background:#f7f9fb">Zero</span><span class="chip" style="background:#fee2e2">Positive</span><small>Each matrix has its own symmetric colour scale.</small></div><button id="download">Download all forward rates and basis (CSV)</button><div id="detail" aria-live="polite">Select a matrix cell to inspect a forward swap.</div></section>
 <section id="estr3m"><h2>3M Euribor − €STR forward par swap rate</h2><div class="matrix-pair"><div><h3>Current basis (bps)</h3><div class="scroll" id="matrix-estr3m"></div></div><div><h3>250-observation level z-score</h3><div class="scroll" id="zmatrix-estr3m"></div></div></div></section>
 <section id="eur3m6m"><h2>6M Euribor − 3M Euribor forward par swap rate</h2><div class="matrix-pair"><div><h3>Current basis (bps)</h3><div class="scroll" id="matrix-eur3m6m"></div></div><div><h3>250-observation level z-score</h3><div class="scroll" id="zmatrix-eur3m6m"></div></div></div></section>
@@ -13,6 +13,10 @@ body{font:14px Arial,sans-serif;background:#eef2f6;color:#172e40;margin:0}main{m
 <label>Basis <select id="history-metric"><option value="eur3m_minus_estr_bps">3M − €STR</option><option value="eur6m_minus_eur3m_bps">6M − 3M</option><option value="eur6m_minus_estr_bps">6M − €STR</option></select></label>
 <label>From <input type="date" id="history-start"></label> <label>To <input type="date" id="history-end"></label>
 <p id="history-stats"></p><div id="history-chart" class="scroll"></div><button id="history-download">Download selected forward history (CSV)</button></section>
+<section id="fixings"><h2>Fixing comparison</h2><p id="fixings-note"></p>
+<div class="scroll" id="fixings-summary"></div>
+<label>Chart <select id="fixings-metric"><option value="levels">Fixing levels (%)</option><option value="spread_6m_minus_3m_bps">6M − 3M fixing spread (bp)</option><option value="spread_3m_minus_estr_bps">3M − €STR fixing spread (bp)</option><option value="spread_6m_minus_estr_bps">6M − €STR fixing spread (bp)</option></select></label>
+<div id="fixings-chart" class="scroll"></div></section>
 <section id="inputs"><h2>Quoted spot-starting par swap curves</h2><p>Rates are percentages; input spreads are bps. No supplied example rates are substituted for live Bloomberg data.</p><div class="scroll" id="quote-table"></div><details><summary>Curve calibration — all 45 quotes</summary><p id="calibration-status"></p><div class="scroll" id="calibration-table"></div></details></section>
 <section id="method"><h2>Calculation and conventions</h2><p>First bootstrap the €STR discount curve from OIS quotes. Bootstrap separate 3M and 6M Euribor projection curves from their respective par swaps, discounting both on €STR. Curves use log-linear discount-factor interpolation and Actual/365 Fixed curve time. All 45 input par quotes must reprice within 0.00001 bp.</p><p>The 10Y-forward 20Y swap can extend slightly beyond the spot 30Y pillar after calendar adjustment. Allow up to 10 calendar days of flat terminal-forward-rate extrapolation; reject longer extensions. Each forward's CSV records tail_extension_days.</p><p>Conventions: TARGET calendar, T+2 spot, Modified Following, no end-of-month rule. €STR OIS: annual fixed payments, Actual/360, compounded overnight floating leg and two-business-day payment lag. Euribor swaps: annual fixed payments, 30/360 Bond Basis; quarterly 3M or semiannual 6M floating payments, index Actual/360 conventions, no payment lag.</p><p>Each forward rate comes from dated swap cash flows and QuantLib fairRate(). Basis is the difference between these forward <b>par fixed rates</b>. It is not a directly quoted float-versus-float basis-swap spread: OIS and Euribor fixed-leg day counts and payment timing differ. Terminal comparisons require matching Bloomberg conventions. Before the first 1Y pillar, interpolation determines the curve shape.</p><p id="source"></p></section>
 </main><script id="snapshot" type="application/json">__SNAPSHOT_JSON__</script><script>
@@ -47,4 +51,38 @@ function renderHistory(){
 }
 [hf,hm,hs,he].forEach(el=>el.addEventListener('change',renderHistory));renderHistory();
 document.getElementById('history-download').onclick=()=>{const rows=((DATA.history||{})[hf.value]||[]).filter(r=>r.date>=hs.value&&r.date<=he.value);if(!rows.length)return;const keys=Object.keys(rows[0]),csv=[keys.join(','),...rows.map(r=>keys.map(k=>r[k]).join(','))].join('\n'),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='EUR_basis_history_'+hf.value+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+(function(){
+ const F=DATA.fixings,fmt=(v,d)=>Number.isFinite(v)?v.toFixed(d):'—';
+ if(!F){document.getElementById('fixings-note').textContent='Fixing data not available in this snapshot.';document.getElementById('fixings-metric').style.display='none';return;}
+ const fwd=DATA.forwards.find(f=>f.forward==='1Y1Y'),cmp=fwd?' Current fixings vs 1Y1Y swap-implied forward basis: 3M − €STR fixing '+F.spreads.spread_3m_minus_estr_bps.latest_bps.toFixed(1)+' bp vs '+fwd.eur3m_minus_estr_bps.toFixed(1)+' bp implied; 6M − 3M fixing '+F.spreads.spread_6m_minus_3m_bps.latest_bps.toFixed(1)+' bp vs '+fwd.eur6m_minus_eur3m_bps.toFixed(1)+' bp implied.':'';
+ document.getElementById('fixings-note').textContent='Actual daily published fixings ('+F.levels.eur3m.ticker+', '+F.levels.eur6m.ticker+', '+F.levels.estr.ticker+'), distinct from the swap-implied forward basis above. €STR is an overnight rate, so spreads against Euribor are crude level comparisons (all are simple annualized rates). Fixings through '+F.asof+(F.stale?' (reused from previous snapshot)':'')+'.'+cmp;
+ const L=F.levels,S=F.spreads,rows=[
+  ['3M Euribor fixing',L.eur3m.date,fmt(L.eur3m.pct,3)+' %',fmt(L.eur3m.dod_bps,1),'—','—'],
+  ['6M Euribor fixing',L.eur6m.date,fmt(L.eur6m.pct,3)+' %',fmt(L.eur6m.dod_bps,1),'—','—'],
+  ['€STR fixing',L.estr.date,fmt(L.estr.pct,3)+' %',fmt(L.estr.dod_bps,1),'—','—'],
+  ['6M − 3M spread',F.asof,fmt(S.spread_6m_minus_3m_bps.latest_bps,1)+' bp',fmt(S.spread_6m_minus_3m_bps.dod_bps,1),fmt(S.spread_6m_minus_3m_bps.mean,1),fmt(S.spread_6m_minus_3m_bps.z,2)],
+  ['3M − €STR spread',F.asof,fmt(S.spread_3m_minus_estr_bps.latest_bps,1)+' bp',fmt(S.spread_3m_minus_estr_bps.dod_bps,1),fmt(S.spread_3m_minus_estr_bps.mean,1),fmt(S.spread_3m_minus_estr_bps.z,2)],
+  ['6M − €STR spread',F.asof,fmt(S.spread_6m_minus_estr_bps.latest_bps,1)+' bp',fmt(S.spread_6m_minus_estr_bps.dod_bps,1),fmt(S.spread_6m_minus_estr_bps.mean,1),fmt(S.spread_6m_minus_estr_bps.z,2)]];
+ const t=document.createElement('table'),h=t.createTHead().insertRow();
+ ['Series','Latest date','Level','DoD change (bp)','250d mean (bp)','250d z'].forEach(label=>{const th=document.createElement('th');th.textContent=label;h.append(th)});
+ const body=t.createTBody();rows.forEach(r=>{const tr=body.insertRow();r.forEach(v=>tr.insertCell().textContent=v)});
+ document.getElementById('fixings-summary').append(t);
+ function rolling(values,window){const out=[];for(let i=0;i<values.length;i++){if(i+1<window){out.push(null);continue;}const tail=values.slice(i+1-window,i+1),m=tail.reduce((a,b)=>a+b,0)/window,sd=Math.sqrt(tail.reduce((a,b)=>a+(b-m)*(b-m),0)/(window-1));out.push({mean:m,sd:sd});}return out;}
+ const select=document.getElementById('fixings-metric');
+ function render(){
+  const key=select.value,dates=F.dates,layout={height:430,autosize:false,margin:{l:60,r:20,t:10,b:40},xaxis:{type:'date',rangeslider:{visible:true}},hovermode:'x unified',legend:{orientation:'h'}};
+  let traces;
+  if(key==='levels'){
+   traces=[['3M Euribor',F.eur3m_pct,'#b91c1c'],['6M Euribor',F.eur6m_pct,'#7c2d12'],['€STR',F.estr_pct,'#17658d']].map(([name,y,color])=>({x:dates,y:y,type:'scatter',mode:'lines',name:name,line:{color:color,width:2},hovertemplate:'%{x|%Y-%m-%d}: %{y:.3f}%<extra>'+name+'</extra>'}));
+   layout.yaxis={title:'%',zeroline:false};
+  }else{
+   const y=F[key],stats=rolling(y,250),mean=stats.map(s=>s&&s.mean),band=(k,dash)=>({x:dates,y:stats.map(s=>s&&(s.mean+k*s.sd)),type:'scatter',mode:'lines',name:(k>0?'+':'−')+(Math.abs(k)>1?'2σ':'1σ'),line:{color:'#94a3b8',width:1,dash:dash},hoverinfo:'skip'});
+   traces=[{x:dates,y:y,type:'scatter',mode:'lines',name:'Spread',line:{color:'#17658d',width:2},hovertemplate:'%{x|%Y-%m-%d}: %{y:.1f} bp<extra></extra>'},
+    {x:dates,y:mean,type:'scatter',mode:'lines',name:'250d mean',line:{color:'#0f172a',width:1.5,dash:'dot'},hoverinfo:'skip'},band(1,'dash'),band(-1,'dash'),band(2,'dot'),band(-2,'dot')];
+   layout.yaxis={title:'bp',zeroline:false};
+  }
+  Plotly.react('fixings-chart',traces,layout,{responsive:true,displaylogo:false});
+ }
+ select.addEventListener('change',render);render();
+})();
 </script></body></html>

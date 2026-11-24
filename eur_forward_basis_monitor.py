@@ -16,6 +16,9 @@ TENORS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30)
 STARTS = tuple(range(1, 11))
 LENGTHS = (1, 2, 3, 5, 7, 10, 20)
 TEMPLATES = {'estr': 'EESWE{n} BGN Curncy', 'eur3m': 'EUSW{n}V3 BGN Curncy', 'eur6m': 'EUSA{n} BGN Curncy'}
+# Daily published fixings; distinct from the swap-implied forward basis above.
+FIXING_TICKERS = {'eur3m': 'EUR003M Index', 'eur6m': 'EUR006M Index', 'estr': 'ESTRON Index'}
+SPREAD_KEYS = ('spread_6m_minus_3m_bps', 'spread_3m_minus_estr_bps', 'spread_6m_minus_estr_bps')
 OUTPUT = Path(__file__).parent / 'eur_forward_basis_output'
 
 
@@ -153,6 +156,68 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
+def trailing_z(values, window=250):
+    """Level z-score over the last `window` observations, including the endpoint."""
+    if len(values) < window:
+        return dict(z=None, obs=len(values), mean=None, std=None)
+    tail = values[-window:]
+    mean = math.fsum(tail)/window
+    std = math.sqrt(math.fsum((v-mean)**2 for v in tail)/(window-1))
+    return dict(z=(tail[-1]-mean)/std if std > 1e-12 else None, obs=window, mean=mean, std=std)
+
+
+def fetch_fixings(asof, lookback_days=800):
+    """Daily Euribor/ESTR fixings and fixing spreads; no forward filling of missing dates."""
+    import pandas as pd
+    from xbbg import blp
+    tickers = list(FIXING_TICKERS.values())
+    start = (datetime.fromisoformat(asof) - timedelta(days=lookback_days)).date().isoformat()
+    frame = blp.bdh(tickers=tickers, flds=['PX_LAST'], start_date=start, end_date=asof)
+    if not isinstance(frame, pd.DataFrame):
+        frame = frame.to_pandas()
+    if {'ticker', 'date', 'value'}.issubset(frame.columns):
+        frame = frame.pivot(index='date', columns='ticker', values='value')
+    elif isinstance(frame.columns, pd.MultiIndex):
+        frame.columns = frame.columns.get_level_values(0)
+    frame.index = pd.to_datetime(frame.index).strftime('%Y-%m-%d')
+    frame = frame.reindex(columns=tickers).apply(pd.to_numeric, errors='coerce').sort_index()
+    levels = {}
+    for name, ticker in FIXING_TICKERS.items():
+        valid = frame[ticker].dropna()
+        if len(valid) < 260:
+            raise ValueError(f'Only {len(valid)} observations for {ticker}; need at least 260')
+        levels[name] = dict(ticker=ticker, date=valid.index[-1], pct=float(valid.iloc[-1]),
+                            dod_bps=float((valid.iloc[-1]-valid.iloc[-2])*100) if len(valid) > 1 else None)
+    common = frame.dropna()
+    if len(common) < 260:
+        raise ValueError(f'Only {len(common)} dates with all three fixings; need at least 260')
+    eur3m, eur6m, estr = (common[FIXING_TICKERS[n]] for n in ('eur3m', 'eur6m', 'estr'))
+    spreads = dict(spread_6m_minus_3m_bps=(eur6m-eur3m)*100,
+                   spread_3m_minus_estr_bps=(eur3m-estr)*100,
+                   spread_6m_minus_estr_bps=(eur6m-estr)*100)
+    arrays = {key: [float(v) for v in series] for key, series in spreads.items()}
+    summary = {}
+    for key, values in arrays.items():
+        stat = trailing_z(values)
+        summary[key] = dict(latest_bps=values[-1],
+                            dod_bps=values[-1]-values[-2] if len(values) > 1 else None, **stat)
+    return dict(asof=common.index[-1], requested_asof=asof, source='Bloomberg PX_LAST fixings',
+                levels=levels, dates=list(common.index),
+                eur3m_pct=[float(v) for v in eur3m], eur6m_pct=[float(v) for v in eur6m],
+                estr_pct=[float(v) for v in estr], **arrays, spreads=summary)
+
+
+def stale_fixings():
+    """Reuse the previous snapshot's fixing block when Bloomberg is unavailable."""
+    snapshot = OUTPUT/'latest_snapshot.json'
+    if snapshot.exists():
+        previous = json.loads(snapshot.read_text(encoding='utf-8')).get('fixings')
+        if previous:
+            return dict(previous, stale=True,
+                        source=previous.get('source', '') + ' (reused; no fresh Bloomberg pull)')
+    return None
+
+
 def latest_zscores(history, asof, window=250):
     """Level z-score including the endpoint, using sample standard deviation."""
     result = {}
@@ -199,7 +264,22 @@ def main():
     metadata = dict(asof=asof, requested_asof=args.asof, source=source,
                     generated=datetime.now(timezone(timedelta(hours=8))).isoformat(), quantlib=ql.__version__, **history_meta)
     zscores = latest_zscores(history,asof)
-    payload = dict(metadata=metadata, quotes=quotes, calibration=calibration, forwards=forwards, history=history, zscores=zscores)
+    if args.offline:
+        fixings = stale_fixings()
+    else:
+        try:
+            fixings = fetch_fixings(args.asof)
+        except Exception as exc:
+            print(f'WARNING: fixing pull failed ({exc}); reusing previous snapshot if available')
+            fixings = stale_fixings()
+    if fixings:
+        rows = [dict(date=d, eur3m_pct=a, eur6m_pct=b, estr_pct=c,
+                     **{key: fixings[key][i] for key in SPREAD_KEYS})
+                for i, (d, a, b, c) in enumerate(zip(fixings['dates'], fixings['eur3m_pct'],
+                                                     fixings['eur6m_pct'], fixings['estr_pct']))]
+        write_csv(OUTPUT/f'EUR_Fixings_{asof.replace("-", "")}.csv', rows)
+    payload = dict(metadata=metadata, quotes=quotes, calibration=calibration, forwards=forwards,
+                   history=history, zscores=zscores, fixings=fixings)
     write_csv(OUTPUT/f'EUR_Forward_Basis_{asof.replace("-", "")}.csv', forwards)
     write_csv(OUTPUT/f'EUR_Quotes_{asof.replace("-", "")}.csv', quotes)
     write_csv(OUTPUT/f'EUR_Calibration_{asof.replace("-", "")}.csv', calibration)
