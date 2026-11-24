@@ -1459,11 +1459,6 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
         "G2 & FN relative value", "fig",
         lambda: _fig_g2_fn_recent_jpm_perf(payloads["g2_fn_perf_data"], payloads["g2_fn_perf_summary"]),
     )
-    _try_view(
-        b, "G2 Minus FN Daily JPM Performance vs Daily CT10 Yield Change",
-        "G2 & FN relative value", "fig",
-        lambda: _fig_g2_fn_ct10_rolling_corr(payloads["g2_fn_perf_data"], payloads["g2_fn_perf_summary"]),
-    )
     g2_fn_specs = rv._g2_fn_specs()
     g2_fn_half = (len(g2_fn_specs) + 1) // 2
     _add_momentum_pages(
@@ -1506,15 +1501,6 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
             "Cumulative swap Perf (32nds)",
         ),
     )
-    for agency in rv.STRUCTURE_AGENCIES:
-        _try_view(
-            b, f"{agency} Adjacent-Coupon Swap JPM Perf vs Daily CT10 Yield Change",
-            "Coupon structures", "fig",
-            lambda agency=agency: _fig_structure_ct10_rolling_corr(
-                payloads["coupon_swap_data"], payloads["coupon_swap_summary"],
-                "Adjacent-Coupon Swap JPM Perf", agency,
-            ),
-        )
     _add_momentum_pages(
         b, payloads, "coupon_swap_momentum",
         "Adjacent-Coupon Swap Momentum Monitor", "Coupon structures",
@@ -1546,15 +1532,6 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
             "Cumulative swap Perf (32nds)",
         ),
     )
-    for agency in rv.STRUCTURE_AGENCIES:
-        _try_view(
-            b, f"{agency} 100-bps-Wide Coupon Swap JPM Perf vs Daily CT10 Yield Change",
-            "Coupon structures", "fig",
-            lambda agency=agency: _fig_structure_ct10_rolling_corr(
-                payloads["wide_swap_data"], payloads["wide_swap_summary"],
-                "100-bps-Wide Coupon Swap JPM Perf", agency,
-            ),
-        )
     _add_momentum_pages(
         b, payloads, "wide_swap_momentum",
         "100-bps-Wide Coupon Swap Momentum Monitor", "Coupon structures",
@@ -1581,15 +1558,6 @@ def _build_pages(payloads: Dict) -> _ReportBuilder:
         "Coupon structures", "fig",
         lambda: _fig_coupon_fly_recent_price(payloads["coupon_fly_data"]),
     )
-    for agency in rv.STRUCTURE_AGENCIES:
-        _try_view(
-            b, f"{agency} Three-Price Coupon Fly Changes vs Daily CT10 Yield Change",
-            "Coupon structures", "fig",
-            lambda agency=agency: _fig_structure_ct10_rolling_corr(
-                payloads["coupon_fly_data"], payloads["coupon_fly_summary"],
-                "Three-Price Coupon Fly Changes", agency,
-            ),
-        )
     _add_momentum_pages(
         b, payloads, "coupon_fly_momentum",
         "Three-Price Coupon Fly Momentum Monitor", "Coupon structures",
@@ -1909,6 +1877,40 @@ def _build_appendix_pages(b: _ReportBuilder, payloads: Dict) -> None:
             if fig is not None:
                 options.append((f"{AGENCY_NAMES.get(agency, agency)} ({agency})", fig))
         _try_view(b, title, "Appendix", "dropdown", options, label="Agency")
+
+    # Structure vs CT10 rolling-correlation charts (moved out of the main flow)
+    _try_view(
+        b, "G2 Minus FN Daily JPM Performance vs Daily CT10 Yield Change",
+        "Appendix", "fig",
+        lambda: _fig_g2_fn_ct10_rolling_corr(payloads["g2_fn_perf_data"], payloads["g2_fn_perf_summary"]),
+    )
+    for agency in rv.STRUCTURE_AGENCIES:
+        _try_view(
+            b, f"{agency} Adjacent-Coupon Swap JPM Perf vs Daily CT10 Yield Change",
+            "Appendix", "fig",
+            lambda agency=agency: _fig_structure_ct10_rolling_corr(
+                payloads["coupon_swap_data"], payloads["coupon_swap_summary"],
+                "Adjacent-Coupon Swap JPM Perf", agency,
+            ),
+        )
+    for agency in rv.STRUCTURE_AGENCIES:
+        _try_view(
+            b, f"{agency} 100-bps-Wide Coupon Swap JPM Perf vs Daily CT10 Yield Change",
+            "Appendix", "fig",
+            lambda agency=agency: _fig_structure_ct10_rolling_corr(
+                payloads["wide_swap_data"], payloads["wide_swap_summary"],
+                "100-bps-Wide Coupon Swap JPM Perf", agency,
+            ),
+        )
+    for agency in rv.STRUCTURE_AGENCIES:
+        _try_view(
+            b, f"{agency} Three-Price Coupon Fly Changes vs Daily CT10 Yield Change",
+            "Appendix", "fig",
+            lambda agency=agency: _fig_structure_ct10_rolling_corr(
+                payloads["coupon_fly_data"], payloads["coupon_fly_summary"],
+                "Three-Price Coupon Fly Changes", agency,
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

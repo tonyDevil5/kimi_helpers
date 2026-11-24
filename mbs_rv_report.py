@@ -336,6 +336,12 @@ def load_mbs_rv(
 
     dat = pd.read_excel(fpath, index_col=0)
     dat.index = pd.to_datetime(dat.index)
+    # Drop columns with no data at all (e.g. unrefreshed formula blocks saved
+    # empty) before the row-wise dropna, else they wipe out the whole frame.
+    empty_cols = dat.columns[dat.isna().all()].tolist()
+    if empty_cols:
+        print(f"Warning: dropping {len(empty_cols)} all-empty columns: {empty_cols}")
+        dat = dat.dropna(axis=1, how="all")
     dat = dat.dropna()
     if use_tsy_implied_perf or perf_audit_path is not None:
         calculated_dat, perf_audit = calculate_coupon_perf_vs_tsy(dat, fpath=fpath)
@@ -379,6 +385,9 @@ def load_tsy_oas_data(fpath: str | Path = FNAME) -> pd.DataFrame:
     # dropped to its own valid history in build_tsy_oas_summary so a short
     # new coupon cannot truncate the rest of the table.
     oas_df = oas_df.dropna(how="all")
+    if oas_df.empty:
+        print("Loaded TSY OAS data: no non-empty observations")
+        return oas_df
     print(f"Loaded TSY OAS data: {oas_df.shape[0]} rows x {oas_df.shape[1]} cols, "
           f"{oas_df.index[0].date()} to {oas_df.index[-1].date()}")
     return oas_df
